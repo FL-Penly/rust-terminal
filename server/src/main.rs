@@ -501,7 +501,8 @@ unset TMUX TMUX_PANE
 tty > {} 2>/dev/null
 printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
-    exec tmux attach
+    tmux set -g window-size latest 2>/dev/null
+    tmux attach
 fi
 ZDOTDIR={} exec {}
 "#,
@@ -524,7 +525,8 @@ unset TMUX TMUX_PANE
 tty > {} 2>/dev/null
 printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
-    exec tmux attach
+    tmux set -g window-size latest 2>/dev/null
+    tmux attach
 fi
 exec bash --rcfile /tmp/rust_terminal_bashrc
 "#,
@@ -538,7 +540,8 @@ unset TMUX TMUX_PANE
 tty > {} 2>/dev/null
 printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
-    exec tmux attach
+    tmux set -g window-size latest 2>/dev/null
+    tmux attach
 fi
 exec {}
 "#,
@@ -1148,10 +1151,8 @@ async fn api_tmux_create(
         }
     };
 
-    // Create session detached
     let _ = run_cmd("tmux", &["new-session", "-d", "-s", &name]);
 
-    // Switch to it
     match run_cmd(
         "tmux",
         &["switch-client", "-c", &client_tty, "-t", &name],

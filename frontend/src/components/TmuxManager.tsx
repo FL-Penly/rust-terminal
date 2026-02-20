@@ -38,7 +38,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({ isOpen, onClos
         }
       }
     } catch {}
-    sendInput(` tmux new-session -d -s ${name} 2>/dev/null; tmux switch-client -t ${name} 2>/dev/null || tmux new -A -s ${name}\r`)
+    sendInput(` tmux new-session -d -s ${name} 2>/dev/null; tmux attach -t ${name}\r`)
     sessionStorage.setItem('ttyd_last_tmux_session', name)
   }
 
