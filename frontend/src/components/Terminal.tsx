@@ -28,7 +28,7 @@ export const Terminal = () => {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const { subscribeOutput, sendInput, sendControl, resize, setClientTty } = useTerminal()
+  const { subscribeOutput, sendInput, sendControl, resize, setClientTty, mobileKeyboardLocked, setMobileKeyboardLocked } = useTerminal()
   const setClientTtyRef = useRef(setClientTty)
   
   const [fontSize, setFontSize] = useState(() => {
@@ -49,8 +49,11 @@ export const Terminal = () => {
   const xtermScreenRef = useRef<HTMLElement | null>(null)
   const pinchWriteTimerRef = useRef<number | null>(null)
   const pinchResizeTimerRef = useRef<number | null>(null)
+  const xtermTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const setMobileKeyboardLockedRef = useRef(setMobileKeyboardLocked)
 
   useEffect(() => { sendInputRef.current = sendInput }, [sendInput])
+  useEffect(() => { setMobileKeyboardLockedRef.current = setMobileKeyboardLocked }, [setMobileKeyboardLocked])
 
   const handleResize = useCallback(() => {
     if (fitAddonRef.current && termRef.current) {
@@ -238,6 +241,14 @@ export const Terminal = () => {
     // Open terminal in container
     term.open(containerRef.current)
 
+    // Mobile keyboard management: lock virtual keyboard by default on touch devices
+    const xtermTextarea = containerRef.current.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null
+    xtermTextareaRef.current = xtermTextarea
+    const isMobileDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)
+    if (isMobileDevice && xtermTextarea) {
+      xtermTextarea.setAttribute('inputmode', 'none')
+    }
+
     const xtermScreen = containerRef.current.querySelector('.xterm-screen') as HTMLElement | null
     xtermScreenRef.current = xtermScreen
     let pendingMouseDown: MouseEvent | null = null
@@ -325,7 +336,10 @@ export const Terminal = () => {
           if (typeof p === 'number') {
             if (p === 1000 || p === 1002 || p === 1003) mouseStateRef.current.mouseTracking = true
             if (p === 1006) mouseStateRef.current.sgrMode = true
-            if (p === 1049 || p === 47) predictiveEchoRef.current?.setAltScreen(true)
+            if (p === 1049 || p === 47) {
+              predictiveEchoRef.current?.setAltScreen(true)
+              setMobileKeyboardLockedRef.current(true)
+            }
           }
         }
         return false
@@ -518,6 +532,23 @@ export const Terminal = () => {
       term.dispose()
     }
   }, [subscribeOutput, sendInput, sendControl, resize, handleResize, debouncedResize, handleTouchStart, handleTouchMove, handleTouchEnd])
+
+  useEffect(() => {
+    const textarea = xtermTextareaRef.current
+    if (!textarea) return
+    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)
+    if (!isTouchDevice) return
+
+    if (mobileKeyboardLocked) {
+      textarea.setAttribute('inputmode', 'none')
+      if (document.activeElement === textarea) {
+        textarea.blur()
+      }
+    } else {
+      textarea.removeAttribute('inputmode')
+      textarea.focus({ preventScroll: true })
+    }
+  }, [mobileKeyboardLocked])
 
   const zoomPercent = Math.round((fontSize / DEFAULT_FONT_SIZE) * 100)
 
