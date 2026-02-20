@@ -1,20 +1,6 @@
-English | [简体中文](./README_zh.md)
-
 # Rust Terminal
 
 A mobile-optimized web terminal powered by a single Rust binary. Access your development terminal from your phone — operate AI coding tools like Claude Code, OpenCode on the go.
-
-This is a rewrite of [mobile-terminal](../mobile-terminal/), replacing `ttyd + Python diff-server` with a unified Rust backend (axum + portable-pty).
-
-## Why Rust?
-
-| | mobile-terminal | rust-terminal |
-|---|---|---|
-| Architecture | ttyd + Python diff-server (2 processes) | Single Rust binary |
-| Dependencies | ttyd, Python 3 | None (self-contained) |
-| WebSocket | ttyd default (per-byte) | Frame merging (16ms flush) |
-| API | Separate port (:7683) | Same-origin (/api/*) |
-| Deployment | `./local_terminal.sh` | `./run.sh` |
 
 ## Features
 
@@ -68,7 +54,7 @@ cd server && cargo build --release
 ## Architecture
 
 ```
-Phone ──HTTP/WS──▶ Rust Server (:7681)
+Phone ──HTTP/WS──▶ Rust Server (:7682)
                     ├── WebSocket /ws     → PTY (terminal)
                     ├── GET /api/*        → Git, Tmux, CWD APIs
                     ├── POST /api/*       → Image upload
@@ -86,7 +72,7 @@ cp .env.example .env
 
 | Config | Description | Default |
 |--------|-------------|---------|
-| `PORT` | Server port | 7681 |
+| `PORT` | Server port | 7682 |
 
 ## Features Detail
 
