@@ -38,18 +38,13 @@ After startup, access the URL shown in terminal output from your phone.
 
 ## Prerequisites
 
-- Rust toolchain (for building)
-- Node.js (for building frontend, only needed once)
+- Rust toolchain ([install](https://rustup.rs/))
+- C compiler (`build-essential` on Ubuntu, Xcode CLI tools on macOS)
+- tmux (recommended, for session persistence)
 
-### Building
+Node.js is **not** required — the frontend is pre-built and committed.
 
-```bash
-# Build frontend
-cd frontend && npm install && npm run build && cd ..
-
-# Build server (or just run ./run.sh which auto-builds)
-cd server && cargo build --release
-```
+For detailed setup instructions (per-platform install commands, troubleshooting), see **[SETUP.md](SETUP.md)**.
 
 ## Architecture
 
