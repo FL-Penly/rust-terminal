@@ -1,33 +1,61 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 
-interface TextInputModalProps {
+const DRAFT_KEY = 'ttyd_text_input_draft'
+const LINE_HEIGHT = 20
+const PADDING_Y = 12
+const SINGLE_LINE = LINE_HEIGHT + PADDING_Y
+const MAX_HEIGHT_RATIO = 0.4
+
+interface TextInputBarProps {
   isOpen: boolean
   onClose: () => void
   onSend: (text: string) => void
 }
 
-export const TextInputModal: React.FC<TextInputModalProps> = ({ isOpen, onClose, onSend }) => {
-  const [text, setText] = useState('')
+export const TextInputModal: React.FC<TextInputBarProps> = ({ isOpen, onClose, onSend }) => {
+  const [text, setText] = useState(() => sessionStorage.getItem(DRAFT_KEY) || '')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const maxHeight = typeof window !== 'undefined'
+    ? (window.visualViewport?.height || window.innerHeight) * MAX_HEIGHT_RATIO
+    : 200
+
+  const autoResize = useCallback(() => {
+    const ta = textareaRef.current
+    if (!ta) return
+    ta.style.height = `${SINGLE_LINE}px`
+    const scrollH = ta.scrollHeight
+    ta.style.height = `${Math.min(scrollH, maxHeight)}px`
+    ta.style.overflowY = scrollH > maxHeight ? 'auto' : 'hidden'
+  }, [maxHeight])
 
   useEffect(() => {
     if (isOpen) {
-      // Focus textarea with a slight delay to ensure modal is rendered
+      const draft = sessionStorage.getItem(DRAFT_KEY)
+      if (draft) setText(draft)
       setTimeout(() => {
-        if (textareaRef.current) {
-          textareaRef.current.focus()
-        }
+        textareaRef.current?.focus()
+        autoResize()
       }, 50)
-    } else {
-      setText('')
     }
-  }, [isOpen])
+  }, [isOpen, autoResize])
 
-  const handleSend = () => {
+  useEffect(() => {
+    autoResize()
+  }, [text, autoResize])
+
+  const handleTextChange = useCallback((value: string) => {
+    setText(value)
+    sessionStorage.setItem(DRAFT_KEY, value)
+  }, [])
+
+  const handleSend = useCallback(() => {
     if (!text) return
     onSend(text)
+    setText('')
+    sessionStorage.removeItem(DRAFT_KEY)
     onClose()
-  }
+  }, [text, onSend, onClose])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -39,48 +67,30 @@ export const TextInputModal: React.FC<TextInputModalProps> = ({ isOpen, onClose,
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-      <div 
-        className="bg-bg-secondary w-full max-w-lg mx-4 rounded-xl shadow-2xl border border-border-subtle flex flex-col h-[50vh]"
-        onClick={e => e.stopPropagation()}
+    <div className="shrink-0 bg-bg-secondary border-t border-border-subtle flex items-end gap-1.5 px-2 py-1.5">
+      <button
+        onClick={onClose}
+        className="shrink-0 w-8 h-8 flex items-center justify-center text-text-secondary active:bg-bg-tertiary rounded-lg text-sm mb-[1px]"
       >
-        <div className="flex items-center justify-between p-4 border-b border-border-subtle">
-          <h2 className="text-lg font-semibold text-text-primary">Input Text</h2>
-          <button 
-            onClick={onClose}
-            className="p-2 text-text-secondary hover:text-text-primary transition-colors"
-          >
-            ✕
-          </button>
-        </div>
-
-        <div className="flex-1 p-4">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={e => setText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Type or paste long text here..."
-            className="w-full h-full bg-bg-primary border border-border-subtle rounded p-3 font-mono text-sm text-text-primary focus:outline-none focus:border-accent-blue resize-none"
-          />
-        </div>
-
-        <div className="p-4 border-t border-border-subtle flex justify-end gap-3">
-          <button 
-            onClick={onClose}
-            className="px-4 py-2 rounded text-text-secondary hover:bg-bg-tertiary transition-colors"
-          >
-            Cancel
-          </button>
-          <button 
-            onClick={handleSend}
-            disabled={!text}
-            className="px-4 py-2 bg-accent-blue text-white rounded font-medium hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            Send (Cmd+Enter)
-          </button>
-        </div>
-      </div>
+        ✕
+      </button>
+      <textarea
+        ref={textareaRef}
+        value={text}
+        onChange={e => handleTextChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Type or paste text..."
+        rows={1}
+        className="flex-1 bg-bg-primary border border-border-subtle rounded-lg px-3 py-1.5 font-mono text-sm text-text-primary leading-5 focus:outline-none focus:border-accent-blue resize-none min-w-0"
+        style={{ height: `${SINGLE_LINE}px`, overflowY: 'hidden' }}
+      />
+      <button
+        onClick={handleSend}
+        disabled={!text}
+        className="shrink-0 px-3 h-8 bg-accent-blue text-white text-sm rounded-lg font-medium active:opacity-80 disabled:opacity-40 mb-[1px]"
+      >
+        Send
+      </button>
     </div>
   )
 }

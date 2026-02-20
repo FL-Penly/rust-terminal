@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { Toolbar } from './Toolbar'
 import { StatusBar } from './StatusBar'
-import { ActivityStream } from './ActivityStream'
 import { ConnectionOverlay } from './ConnectionOverlay'
 import { useTerminal } from '../contexts/TerminalContext'
 
@@ -38,8 +37,6 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
       style={heightStyle}
     >
       <StatusBar />
-
-      <ActivityStream />
 
       <div 
         ref={terminalRef} 

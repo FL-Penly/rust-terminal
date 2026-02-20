@@ -81,19 +81,61 @@ export const Toolbar: React.FC = () => {
 
   return (
     <>
-      <div className="bg-bg-secondary border-t border-border-subtle shrink-0 pb-[env(safe-area-inset-bottom)]">
-        <div className="flex flex-col gap-1.5 px-2 py-1.5">
+      <div className="shrink-0 flex flex-col">
+        <TextInputModal
+          isOpen={isInputOpen}
+          onClose={() => setIsInputOpen(false)}
+          onSend={(text) => sendInput(text)}
+        />
 
-          {isExpanded ? (
-            <>
-              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-                <Toggle expanded onClick={toggleExpanded} />
+        <div className="bg-bg-secondary border-t border-border-subtle pb-[env(safe-area-inset-bottom)]">
+          <div className="flex flex-col gap-1.5 px-2 py-1.5">
+
+            {isExpanded ? (
+              <>
+                <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+                  <Toggle expanded onClick={toggleExpanded} />
+                  {isTouchDevice && (
+                    <KbToggle locked={mobileKeyboardLocked} onClick={() => { hapticTap(); setMobileKeyboardLocked(!mobileKeyboardLocked) }} />
+                  )}
+                  <K label="ESC" onClick={() => k('ESC')} />
+                  <K label="^C" onClick={() => k('CTRL_C')} className="text-accent-red" />
+                  <K label="^L" onClick={() => k('CTRL_L')} />
+                  <Sep />
+                  <CmdGroup config={config} onCmd={c} />
+                  <Sys label="⌨️" onClick={() => setIsInputOpen(true)} aria-label="Text input" />
+                  <Sys label="📷" onClick={() => fileInputRef.current?.click()} aria-label="Upload image" />
+                  <Sys label="Sel" onClick={() => { hapticTap(); window.dispatchEvent(new Event('terminal-copy-viewport')) }} className="text-accent-purple" aria-label="Copy viewport" />
+                  <Sys label="Diff" onClick={() => setIsDiffOpen(true)} className="text-accent-green" />
+                  <Sys label="⚙️" onClick={() => setIsSettingsOpen(true)} aria-label="Settings" />
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <K label="Tab" onClick={() => k('TAB')} wide />
+                  <K label="Enter" onClick={() => k('ENTER')} wide />
+                  <div className="flex-1" />
+                  <K label="↑" onClick={() => k('ARROW_UP')} />
+                </div>
+
+                <div className="flex items-center gap-1.5 justify-end">
+                  <K label="←" onClick={() => k('ARROW_LEFT')} />
+                  <K label="↓" onClick={() => k('ARROW_DOWN')} />
+                  <K label="→" onClick={() => k('ARROW_RIGHT')} />
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar mask-gradient-right">
+                <Toggle expanded={false} onClick={toggleExpanded} />
                 {isTouchDevice && (
                   <KbToggle locked={mobileKeyboardLocked} onClick={() => { hapticTap(); setMobileKeyboardLocked(!mobileKeyboardLocked) }} />
                 )}
                 <K label="ESC" onClick={() => k('ESC')} />
+                <K label="Tab" onClick={() => k('TAB')} />
                 <K label="^C" onClick={() => k('CTRL_C')} className="text-accent-red" />
-                <K label="^L" onClick={() => k('CTRL_L')} />
+                <K label="↑" onClick={() => k('ARROW_UP')} />
+                <K label="↓" onClick={() => k('ARROW_DOWN')} />
+                <K label="←" onClick={() => k('ARROW_LEFT')} />
+                <K label="→" onClick={() => k('ARROW_RIGHT')} />
                 <Sep />
                 <CmdGroup config={config} onCmd={c} />
                 <Sys label="⌨️" onClick={() => setIsInputOpen(true)} aria-label="Text input" />
@@ -102,43 +144,9 @@ export const Toolbar: React.FC = () => {
                 <Sys label="Diff" onClick={() => setIsDiffOpen(true)} className="text-accent-green" />
                 <Sys label="⚙️" onClick={() => setIsSettingsOpen(true)} aria-label="Settings" />
               </div>
+            )}
 
-              <div className="flex items-center gap-1.5">
-                <K label="Tab" onClick={() => k('TAB')} wide />
-                <K label="Enter" onClick={() => k('ENTER')} wide />
-                <div className="flex-1" />
-                <K label="↑" onClick={() => k('ARROW_UP')} />
-              </div>
-
-              <div className="flex items-center gap-1.5 justify-end">
-                <K label="←" onClick={() => k('ARROW_LEFT')} />
-                <K label="↓" onClick={() => k('ARROW_DOWN')} />
-                <K label="→" onClick={() => k('ARROW_RIGHT')} />
-              </div>
-            </>
-          ) : (
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar mask-gradient-right">
-              <Toggle expanded={false} onClick={toggleExpanded} />
-              {isTouchDevice && (
-                <KbToggle locked={mobileKeyboardLocked} onClick={() => { hapticTap(); setMobileKeyboardLocked(!mobileKeyboardLocked) }} />
-              )}
-              <K label="ESC" onClick={() => k('ESC')} />
-              <K label="Tab" onClick={() => k('TAB')} />
-              <K label="^C" onClick={() => k('CTRL_C')} className="text-accent-red" />
-              <K label="↑" onClick={() => k('ARROW_UP')} />
-              <K label="↓" onClick={() => k('ARROW_DOWN')} />
-              <K label="←" onClick={() => k('ARROW_LEFT')} />
-              <K label="→" onClick={() => k('ARROW_RIGHT')} />
-              <Sep />
-              <CmdGroup config={config} onCmd={c} />
-              <Sys label="⌨️" onClick={() => setIsInputOpen(true)} aria-label="Text input" />
-              <Sys label="📷" onClick={() => fileInputRef.current?.click()} aria-label="Upload image" />
-              <Sys label="Sel" onClick={() => { hapticTap(); window.dispatchEvent(new Event('terminal-copy-viewport')) }} className="text-accent-purple" aria-label="Copy viewport" />
-              <Sys label="Diff" onClick={() => setIsDiffOpen(true)} className="text-accent-green" />
-              <Sys label="⚙️" onClick={() => setIsSettingsOpen(true)} aria-label="Settings" />
-            </div>
-          )}
-
+          </div>
         </div>
       </div>
 
@@ -146,12 +154,6 @@ export const Toolbar: React.FC = () => {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         onConfigChange={loadConfig}
-      />
-
-      <TextInputModal
-        isOpen={isInputOpen}
-        onClose={() => setIsInputOpen(false)}
-        onSend={(text) => sendInput(text)}
       />
 
       <input
