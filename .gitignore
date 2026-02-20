@@ -1,0 +1,17 @@
+# Rust
+server/target/
+*.swp
+
+# Frontend
+frontend/node_modules/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# General
+.DS_Store
+.env
+*.log
+
+# Agent working files
+.sisyphus/

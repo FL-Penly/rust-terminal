@@ -1,0 +1,25 @@
+[package]
+name = "rust-terminal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+bytes = "1"
+futures-util = "0.3"
+tokio-stream = "0.1"
+http = "1"
+tower = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
