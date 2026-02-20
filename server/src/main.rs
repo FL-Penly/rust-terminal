@@ -95,12 +95,17 @@ fn print_access_urls(port: u16) {
     eprintln!("==========================================");
     eprintln!();
 
-    // Try to get local IPs
-    if let Ok(output) = StdCommand::new("hostname").arg("-I").output() {
-        let ips = String::from_utf8_lossy(&output.stdout);
-        for ip in ips.split_whitespace() {
-            if ip.contains('.') && !ip.starts_with("127.") {
-                eprintln!("  http://{}:{}", ip, port);
+    // Try to get local IPs (works on both macOS and Linux)
+    if let Ok(output) = StdCommand::new("ifconfig").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("inet ") {
+                if let Some(ip) = rest.split_whitespace().next() {
+                    if ip != "127.0.0.1" {
+                        eprintln!("  http://{}:{}", ip, port);
+                    }
+                }
             }
         }
     }
