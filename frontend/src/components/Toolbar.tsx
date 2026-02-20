@@ -7,8 +7,7 @@ import { DiffViewer } from './DiffViewer'
 const hapticTap = () => { try { navigator.vibrate?.(8) } catch {} }
 
 export const Toolbar: React.FC = () => {
-  const { sendKey, sendInput, mobileKeyboardLocked, setMobileKeyboardLocked } = useTerminal()
-  const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)
+  const { sendKey, sendInput } = useTerminal()
   const [config, setConfig] = useState<CommandConfig | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isInputOpen, setIsInputOpen] = useState(false)
@@ -95,9 +94,6 @@ export const Toolbar: React.FC = () => {
               <>
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
                   <Toggle expanded onClick={toggleExpanded} />
-                  {isTouchDevice && (
-                    <KbToggle locked={mobileKeyboardLocked} onClick={() => { hapticTap(); setMobileKeyboardLocked(!mobileKeyboardLocked) }} />
-                  )}
                   <K label="ESC" onClick={() => k('ESC')} />
                   <K label="^C" onClick={() => k('CTRL_C')} className="text-accent-red" />
                   <K label="^L" onClick={() => k('CTRL_L')} />
@@ -126,9 +122,6 @@ export const Toolbar: React.FC = () => {
             ) : (
               <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar mask-gradient-right">
                 <Toggle expanded={false} onClick={toggleExpanded} />
-                {isTouchDevice && (
-                  <KbToggle locked={mobileKeyboardLocked} onClick={() => { hapticTap(); setMobileKeyboardLocked(!mobileKeyboardLocked) }} />
-                )}
                 <K label="ESC" onClick={() => k('ESC')} />
                 <K label="Tab" onClick={() => k('TAB')} />
                 <K label="^C" onClick={() => k('CTRL_C')} className="text-accent-red" />
@@ -189,20 +182,6 @@ const Toggle: React.FC<{ expanded: boolean; onClick: () => void }> = ({ expanded
     aria-label={expanded ? 'Collapse toolbar' : 'Expand toolbar'}
   >
     {expanded ? '▼' : '▲'}
-  </button>
-)
-
-const KbToggle: React.FC<{ locked: boolean; onClick: () => void }> = ({ locked, onClick }) => (
-  <button
-    onClick={onClick}
-    className={`min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg shadow-sm border text-xs font-semibold active:scale-95 transition-transform duration-100 shrink-0 select-none ${
-      locked
-        ? 'bg-bg-tertiary/50 border-border-subtle text-text-secondary'
-        : 'bg-accent-blue/20 border-accent-blue text-accent-blue'
-    }`}
-    aria-label={locked ? 'Show system keyboard' : 'Hide system keyboard'}
-  >
-    Kb
   </button>
 )
 

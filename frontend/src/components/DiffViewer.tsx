@@ -1,14 +1,24 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import ReactDiffViewer from 'react-diff-viewer-continued'
+
+interface DiffLine {
+  type: 'add' | 'del' | 'ctx'
+  old_num?: number
+  new_num?: number
+  content: string
+}
+
+interface DiffHunk {
+  header: string
+  lines: DiffLine[]
+}
 
 interface DiffFile {
   filename: string
   status: 'A' | 'M' | 'D'
   additions: number
   deletions: number
-  oldValue?: string
-  newValue?: string
   binary?: boolean
+  hunks: DiffHunk[]
 }
 
 interface DiffData {
@@ -30,37 +40,6 @@ interface DiffViewerProps {
   onClose: () => void
 }
 
-const darkTheme = {
-  variables: {
-    dark: {
-      diffViewerBackground: '#0d1117',
-      diffViewerColor: '#e6edf3',
-      addedBackground: 'rgba(63, 185, 80, 0.15)',
-      addedColor: '#e6edf3',
-      removedBackground: 'rgba(248, 81, 73, 0.15)',
-      removedColor: '#e6edf3',
-      wordAddedBackground: 'rgba(63, 185, 80, 0.4)',
-      wordRemovedBackground: 'rgba(248, 81, 73, 0.4)',
-      addedGutterBackground: '#1a4d2e',
-      removedGutterBackground: '#4d1a1a',
-      gutterBackground: '#161b22',
-      gutterBackgroundDark: '#0d1117',
-      highlightBackground: '#21262d',
-      highlightGutterBackground: '#21262d',
-      codeFoldGutterBackground: '#161b22',
-      codeFoldBackground: '#161b22',
-      emptyLineBackground: '#161b22',
-      gutterColor: '#6e7681',
-      addedGutterColor: '#3fb950',
-      removedGutterColor: '#f85149',
-      codeFoldContentColor: '#8b949e',
-      diffViewerTitleBackground: '#161b22',
-      diffViewerTitleColor: '#e6edf3',
-      diffViewerTitleBorderColor: '#30363d',
-    }
-  }
-}
-
 const STATUS_LABELS: Record<string, string> = {
   A: 'Added',
   M: 'Modified',
@@ -73,41 +52,22 @@ const STATUS_COLORS: Record<string, string> = {
   D: 'bg-accent-red text-white',
 }
 
-function isChangeRow(row: Element): boolean {
-  const cells = row.querySelectorAll('td')
-  for (const cell of cells) {
-    const pre = cell.querySelector('pre')
-    if (pre) {
-      const text = pre.textContent?.trim()
-      if (text === '+' || text === '-') return true
-    }
-  }
-  return false
+const LINE_STYLES: Record<string, string> = {
+  add: 'bg-[rgba(63,185,80,0.15)] text-[#e6edf3]',
+  del: 'bg-[rgba(248,81,73,0.15)] text-[#e6edf3]',
+  ctx: 'text-[#e6edf3]',
 }
 
-function isFoldRow(row: Element): boolean {
-  return row.textContent?.includes('hidden lines') || false
+const GUTTER_STYLES: Record<string, string> = {
+  add: 'text-accent-green',
+  del: 'text-accent-red',
+  ctx: 'text-[#6e7681]',
 }
 
-function collectHunks(container: HTMLElement): Element[] {
-  const hunks: Element[] = []
-  const rows = Array.from(container.querySelectorAll('tr'))
-  let prevWasChange = false
-  
-  for (const row of rows) {
-    if (isFoldRow(row)) {
-      prevWasChange = false
-      continue
-    }
-    
-    const isChange = isChangeRow(row)
-    if (isChange && !prevWasChange) {
-      hunks.push(row)
-    }
-    prevWasChange = isChange
-  }
-  
-  return hunks
+const PREFIX: Record<string, string> = {
+  add: '+',
+  del: '-',
+  ctx: ' ',
 }
 
 interface FileCardProps {
@@ -117,48 +77,24 @@ interface FileCardProps {
 
 function FileCard({ file, defaultExpanded }: FileCardProps) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
-  const [currentHunkIndex, setCurrentHunkIndex] = useState(-1)
-  const [totalHunks, setTotalHunks] = useState(0)
-  const contentRef = useRef<HTMLDivElement>(null)
-  const hunksRef = useRef<Element[]>([])
-
-  useEffect(() => {
-    if (isExpanded && contentRef.current) {
-      const timer = setTimeout(() => {
-        if (contentRef.current) {
-          hunksRef.current = collectHunks(contentRef.current)
-          setTotalHunks(hunksRef.current.length)
-          setCurrentHunkIndex(hunksRef.current.length > 0 ? 0 : -1)
-        }
-      }, 200)
-      return () => clearTimeout(timer)
-    } else {
-      hunksRef.current = []
-      setTotalHunks(0)
-      setCurrentHunkIndex(-1)
-    }
-  }, [isExpanded])
+  const [currentHunkIndex, setCurrentHunkIndex] = useState(0)
+  const hunkRefs = useRef<(HTMLDivElement | null)[]>([])
 
   const navigateHunk = (direction: 'prev' | 'next') => {
-    if (hunksRef.current.length === 0) return
-    
-    let newIndex: number
-    if (direction === 'prev') {
-      newIndex = Math.max(0, currentHunkIndex - 1)
-    } else {
-      newIndex = Math.min(hunksRef.current.length - 1, currentHunkIndex + 1)
-    }
-    
+    if (file.hunks.length === 0) return
+    const newIndex = direction === 'prev'
+      ? Math.max(0, currentHunkIndex - 1)
+      : Math.min(file.hunks.length - 1, currentHunkIndex + 1)
     if (newIndex !== currentHunkIndex) {
       setCurrentHunkIndex(newIndex)
-      hunksRef.current[newIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      hunkRefs.current[newIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }
   }
 
   return (
     <div className="border border-border-subtle rounded-lg overflow-hidden mb-3">
       <div className="flex items-center justify-between px-3 py-2 bg-bg-tertiary">
-        <div 
+        <div
           className="flex items-center gap-2 min-w-0 cursor-pointer flex-1"
           onClick={() => setIsExpanded(!isExpanded)}
         >
@@ -173,45 +109,60 @@ function FileCard({ file, defaultExpanded }: FileCardProps) {
             {file.additions > 0 && <span className="text-accent-green mr-1">+{file.additions}</span>}
             {file.deletions > 0 && <span className="text-accent-red">-{file.deletions}</span>}
           </span>
-          {isExpanded && totalHunks > 0 && (
+          {isExpanded && file.hunks.length > 1 && (
             <div className="flex items-center gap-1 ml-2">
               <button
-                onClick={(e) => { e.stopPropagation(); navigateHunk('prev'); }}
+                onClick={(e) => { e.stopPropagation(); navigateHunk('prev') }}
                 disabled={currentHunkIndex <= 0}
                 className="w-6 h-6 flex items-center justify-center rounded bg-bg-secondary text-text-secondary hover:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                ↑
-              </button>
+              >↑</button>
               <span className="text-xs text-text-muted min-w-[32px] text-center">
-                {currentHunkIndex + 1}/{totalHunks}
+                {currentHunkIndex + 1}/{file.hunks.length}
               </span>
               <button
-                onClick={(e) => { e.stopPropagation(); navigateHunk('next'); }}
-                disabled={currentHunkIndex >= totalHunks - 1}
+                onClick={(e) => { e.stopPropagation(); navigateHunk('next') }}
+                disabled={currentHunkIndex >= file.hunks.length - 1}
                 className="w-6 h-6 flex items-center justify-center rounded bg-bg-secondary text-text-secondary hover:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                ↓
-              </button>
+              >↓</button>
             </div>
           )}
         </div>
       </div>
-      
+
       {isExpanded && (
-        <div ref={contentRef} className="overflow-x-auto max-h-[400px] overflow-y-auto">
+        <div className="overflow-x-auto max-h-[400px] overflow-y-auto bg-[#0d1117]">
           {file.binary ? (
             <div className="p-4 text-center text-text-muted">Binary file</div>
+          ) : file.hunks.length === 0 ? (
+            <div className="p-4 text-center text-text-muted">No changes</div>
           ) : (
-            <ReactDiffViewer
-              oldValue={file.oldValue || ''}
-              newValue={file.newValue || ''}
-              splitView={false}
-              useDarkTheme={true}
-              styles={darkTheme}
-              showDiffOnly={true}
-              extraLinesSurroundingDiff={3}
-              codeFoldMessageRenderer={(total) => <span>{total} hidden lines</span>}
-            />
+            <table className="w-full text-xs font-mono border-collapse">
+              <tbody>
+                {file.hunks.map((hunk, hi) => (
+                  <React.Fragment key={hi}>
+                    <tr ref={(el) => { hunkRefs.current[hi] = el as HTMLDivElement | null }}>
+                      <td colSpan={4} className="px-3 py-1 text-[#8b949e] bg-[#161b22] border-y border-[#30363d] text-xs select-none">
+                        {hunk.header}
+                      </td>
+                    </tr>
+                    {hunk.lines.map((line, li) => (
+                      <tr key={li} className={LINE_STYLES[line.type]}>
+                        <td className={`px-2 text-right select-none w-[1%] whitespace-nowrap ${GUTTER_STYLES[line.type]} opacity-60`}>
+                          {line.old_num ?? ''}
+                        </td>
+                        <td className={`px-2 text-right select-none w-[1%] whitespace-nowrap ${GUTTER_STYLES[line.type]} opacity-60`}>
+                          {line.new_num ?? ''}
+                        </td>
+                        <td className={`px-1 select-none w-[1%] ${GUTTER_STYLES[line.type]}`}>
+                          {PREFIX[line.type]}
+                        </td>
+                        <td className="px-2 whitespace-pre">{line.content}</td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       )}
@@ -223,15 +174,11 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose }) => {
   const [data, setData] = useState<DiffData | null>(null)
   const [isLoading, setIsLoading] = useState(false)
 
-   const fetchDiff = useCallback(async () => {
-     setIsLoading(true)
-     try {
-       const response = await fetch(`/api/diff`, { signal: AbortSignal.timeout(5000) })
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`)
-      }
-      
+  const fetchDiff = useCallback(async () => {
+    setIsLoading(true)
+    try {
+      const response = await fetch(`/api/diff`, { signal: AbortSignal.timeout(5000) })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const json = await response.json()
       setData(json)
     } catch (err) {
@@ -245,9 +192,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose }) => {
   }, [])
 
   useEffect(() => {
-    if (isOpen) {
-      fetchDiff()
-    }
+    if (isOpen) fetchDiff()
   }, [isOpen, fetchDiff])
 
   useEffect(() => {
@@ -258,7 +203,6 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose }) => {
         e.preventDefault()
       }
     }
-
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [isOpen, onClose])
@@ -271,7 +215,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose }) => {
   const totalDeletions = data?.summary?.totalDeletions || 0
 
   return (
-    <div 
+    <div
       className="fixed inset-0 z-50 bg-black/80 flex items-end justify-center"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
@@ -283,20 +227,16 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({ isOpen, onClose }) => {
               <span className="text-sm text-accent-purple">{data.branch}</span>
             )}
           </div>
-          <button 
+          <button
             onClick={onClose}
             className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-tertiary text-text-secondary"
-          >
-            ✕
-          </button>
+          >✕</button>
         </div>
-        
+
         <div className="shrink-0 px-4 py-2 border-b border-border-subtle flex items-center justify-between text-xs text-text-secondary">
           <div className="flex items-center gap-3">
             {data?.git_root && (
-              <span className="truncate max-w-[200px]" title={data.git_root}>
-                {data.git_root}
-              </span>
+              <span className="truncate max-w-[200px]" title={data.git_root}>{data.git_root}</span>
             )}
             <span>{totalFiles} file{totalFiles !== 1 ? 's' : ''}</span>
           </div>

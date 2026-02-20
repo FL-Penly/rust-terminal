@@ -886,9 +886,6 @@ fn get_all_branches(path: &str) -> BranchesResponse {
 }
 
 fn get_changed_files(git_root: &str) -> Vec<ChangedFile> {
-    // Stage untracked files (like Python: git add -N .)
-    let _ = run_cmd_in("git", &["add", "-N", "."], git_root);
-
     let output = match run_cmd_in("git", &["diff", "--name-status"], git_root) {
         Ok(o) => o,
         Err(_) => return vec![],
@@ -910,97 +907,198 @@ fn get_changed_files(git_root: &str) -> Vec<ChangedFile> {
         .collect()
 }
 
-fn is_binary_file(git_root: &str, filename: &str) -> bool {
-    run_cmd_in("git", &["diff", "--numstat", "--", filename], git_root)
-        .map(|s| s.starts_with("-\t-"))
-        .unwrap_or(false)
-}
+fn parse_unified_diff(raw: &str, changed_files: &[ChangedFile]) -> DiffResult {
+    let mut files: Vec<DiffFile> = Vec::new();
+    let mut total_additions: i64 = 0;
+    let mut total_deletions: i64 = 0;
 
-fn get_file_content_head(git_root: &str, filename: &str) -> String {
-    let arg = format!("HEAD:{}", filename);
-    run_cmd_in("git", &["show", &arg], git_root).unwrap_or_default()
-}
+    let mut current_filename = String::new();
+    let mut current_hunks: Vec<DiffHunk> = Vec::new();
+    let mut current_lines: Vec<DiffLine> = Vec::new();
+    let mut current_header = String::new();
+    let mut file_adds: i64 = 0;
+    let mut file_dels: i64 = 0;
+    let mut old_line: i64 = 0;
+    let mut new_line: i64 = 0;
+    let mut is_binary = false;
 
-fn get_file_content_workdir(git_root: &str, filename: &str) -> String {
-    let filepath = Path::new(git_root).join(filename);
-    std::fs::read_to_string(filepath).unwrap_or_default()
-}
-
-fn get_file_diff_stats(git_root: &str, filename: &str) -> (i64, i64) {
-    match run_cmd_in("git", &["diff", "--numstat", "--", filename], git_root) {
-        Ok(output) => {
-            let output = output.trim();
-            if output.is_empty() {
-                return (0, 0);
-            }
-            let parts: Vec<&str> = output.split('\t').collect();
-            if parts.len() >= 2 {
-                let additions = parts[0].parse().unwrap_or(0);
-                let deletions = parts[1].parse().unwrap_or(0);
-                (additions, deletions)
-            } else {
-                (0, 0)
-            }
+    let flush_file = |filename: &str,
+                      hunks: &mut Vec<DiffHunk>,
+                      lines: &mut Vec<DiffLine>,
+                      header: &str,
+                      adds: i64,
+                      dels: i64,
+                      binary: bool,
+                      files: &mut Vec<DiffFile>,
+                      changed: &[ChangedFile]| {
+        if !lines.is_empty() {
+            hunks.push(DiffHunk {
+                header: header.to_string(),
+                lines: std::mem::take(lines),
+            });
         }
-        Err(_) => (0, 0),
+        if !filename.is_empty() {
+            let status = changed
+                .iter()
+                .find(|c| c.filename == filename)
+                .map(|c| c.status.clone())
+                .unwrap_or_else(|| "M".to_string());
+            files.push(DiffFile {
+                filename: filename.to_string(),
+                status,
+                binary,
+                additions: adds,
+                deletions: dels,
+                hunks: std::mem::take(hunks),
+            });
+        }
+    };
+
+    for line in raw.lines() {
+        if line.starts_with("+++ b/") {
+            if current_filename.is_empty() {
+                current_filename = line[6..].to_string();
+            }
+        } else if let Some(rest) = line.strip_prefix("--- a/") {
+            flush_file(
+                &current_filename,
+                &mut current_hunks,
+                &mut current_lines,
+                &current_header,
+                file_adds,
+                file_dels,
+                is_binary,
+                &mut files,
+                changed_files,
+            );
+            total_additions += file_adds;
+            total_deletions += file_dels;
+            current_filename = rest.to_string();
+            current_hunks = Vec::new();
+            current_lines = Vec::new();
+            current_header = String::new();
+            file_adds = 0;
+            file_dels = 0;
+            is_binary = false;
+        } else if line.starts_with("--- /dev/null") {
+            flush_file(
+                &current_filename,
+                &mut current_hunks,
+                &mut current_lines,
+                &current_header,
+                file_adds,
+                file_dels,
+                is_binary,
+                &mut files,
+                changed_files,
+            );
+            total_additions += file_adds;
+            total_deletions += file_dels;
+            current_filename = String::new();
+            current_hunks = Vec::new();
+            current_lines = Vec::new();
+            current_header = String::new();
+            file_adds = 0;
+            file_dels = 0;
+            is_binary = false;
+        } else if line.starts_with("diff --git") {
+            continue;
+        } else if line.starts_with("index ") || line.starts_with("new file") || line.starts_with("deleted file") {
+            continue;
+        } else if line.starts_with("Binary files") {
+            is_binary = true;
+        } else if line.starts_with("@@ ") {
+            if !current_lines.is_empty() {
+                current_hunks.push(DiffHunk {
+                    header: current_header.clone(),
+                    lines: std::mem::take(&mut current_lines),
+                });
+            }
+            current_header = line.to_string();
+            // Parse @@ -old_start,old_count +new_start,new_count @@
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                old_line = parts[1]
+                    .trim_start_matches('-')
+                    .split(',')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                new_line = parts[2]
+                    .trim_start_matches('+')
+                    .split(',')
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+            }
+        } else if let Some(content) = line.strip_prefix('+') {
+            file_adds += 1;
+            current_lines.push(DiffLine {
+                line_type: "add".to_string(),
+                old_num: None,
+                new_num: Some(new_line),
+                content: content.to_string(),
+            });
+            new_line += 1;
+        } else if let Some(content) = line.strip_prefix('-') {
+            file_dels += 1;
+            current_lines.push(DiffLine {
+                line_type: "del".to_string(),
+                old_num: Some(old_line),
+                new_num: None,
+                content: content.to_string(),
+            });
+            old_line += 1;
+        } else {
+            let content = line.strip_prefix(' ').unwrap_or(line);
+            current_lines.push(DiffLine {
+                line_type: "ctx".to_string(),
+                old_num: Some(old_line),
+                new_num: Some(new_line),
+                content: content.to_string(),
+            });
+            old_line += 1;
+            new_line += 1;
+        }
+    }
+
+    flush_file(
+        &current_filename,
+        &mut current_hunks,
+        &mut current_lines,
+        &current_header,
+        file_adds,
+        file_dels,
+        is_binary,
+        &mut files,
+        changed_files,
+    );
+    total_additions += file_adds;
+    total_deletions += file_dels;
+
+    DiffResult {
+        summary: DiffSummary {
+            total_files: files.len() as i64,
+            total_additions,
+            total_deletions,
+        },
+        files,
     }
 }
 
 fn get_files_diff(git_root: &str) -> DiffResult {
-    let changed_files = get_changed_files(git_root);
-    let mut files = Vec::new();
-    let mut total_additions: i64 = 0;
-    let mut total_deletions: i64 = 0;
+    let _ = run_cmd_in("git", &["add", "-N", "."], git_root);
 
-    for cf in &changed_files {
-        if is_binary_file(git_root, &cf.filename) {
-            files.push(DiffFile {
-                filename: cf.filename.clone(),
-                status: cf.status.clone(),
-                binary: true,
-                old_value: String::new(),
-                new_value: String::new(),
-                additions: 0,
-                deletions: 0,
-            });
-            continue;
-        }
-
-        let old_value = if cf.status == "A" {
-            String::new()
-        } else {
-            get_file_content_head(git_root, &cf.filename)
-        };
-
-        let new_value = if cf.status == "D" {
-            String::new()
-        } else {
-            get_file_content_workdir(git_root, &cf.filename)
-        };
-
-        let (additions, deletions) = get_file_diff_stats(git_root, &cf.filename);
-        total_additions += additions;
-        total_deletions += deletions;
-
-        files.push(DiffFile {
-            filename: cf.filename.clone(),
-            status: cf.status.clone(),
-            binary: false,
-            old_value,
-            new_value,
-            additions,
-            deletions,
-        });
-    }
-
-    DiffResult {
-        files,
-        summary: DiffSummary {
-            total_files: changed_files.len() as i64,
-            total_additions,
-            total_deletions,
+    let raw = match run_cmd_in("git", &["diff", "-U3"], git_root) {
+        Ok(o) => o,
+        Err(_) => return DiffResult {
+            files: vec![],
+            summary: DiffSummary { total_files: 0, total_additions: 0, total_deletions: 0 },
         },
-    }
+    };
+
+    let changed_files = get_changed_files(git_root);
+    parse_unified_diff(&raw, &changed_files)
 }
 
 // ─── GET /api/diff ─────────────────────────────────────────────────────────
@@ -1487,16 +1585,30 @@ struct ChangedFile {
 }
 
 #[derive(Serialize)]
+struct DiffLine {
+    #[serde(rename = "type")]
+    line_type: String, // "add", "del", "ctx"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_num: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_num: Option<i64>,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct DiffHunk {
+    header: String,
+    lines: Vec<DiffLine>,
+}
+
+#[derive(Serialize)]
 struct DiffFile {
     filename: String,
     status: String,
     binary: bool,
-    #[serde(rename = "oldValue")]
-    old_value: String,
-    #[serde(rename = "newValue")]
-    new_value: String,
     additions: i64,
     deletions: i64,
+    hunks: Vec<DiffHunk>,
 }
 
 #[derive(Serialize)]

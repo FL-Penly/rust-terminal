@@ -28,7 +28,7 @@ export const Terminal = () => {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const { subscribeOutput, sendInput, sendControl, resize, setClientTty, mobileKeyboardLocked, setMobileKeyboardLocked } = useTerminal()
+  const { subscribeOutput, sendInput, sendControl, resize, setClientTty } = useTerminal()
   const setClientTtyRef = useRef(setClientTty)
   
   const [fontSize, setFontSize] = useState(() => {
@@ -50,10 +50,11 @@ export const Terminal = () => {
   const pinchWriteTimerRef = useRef<number | null>(null)
   const pinchResizeTimerRef = useRef<number | null>(null)
   const xtermTextareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const setMobileKeyboardLockedRef = useRef(setMobileKeyboardLocked)
+  const tapRef = useRef({ startX: 0, startY: 0, startTime: 0 })
+  const lastTapTimeRef = useRef(0)
 
   useEffect(() => { sendInputRef.current = sendInput }, [sendInput])
-  useEffect(() => { setMobileKeyboardLockedRef.current = setMobileKeyboardLocked }, [setMobileKeyboardLocked])
+
 
   const handleResize = useCallback(() => {
     if (fitAddonRef.current && termRef.current) {
@@ -111,6 +112,7 @@ export const Terminal = () => {
       }
     } else if (e.touches.length === 1) {
       touchRef.current = { lastY: e.touches[0].clientY, accumDelta: 0, mode: 'scroll' }
+      tapRef.current = { startX: e.touches[0].clientX, startY: e.touches[0].clientY, startTime: Date.now() }
     }
   }, [])
 
@@ -167,8 +169,41 @@ export const Terminal = () => {
     }
   }, [updateFontSize])
 
-  const handleTouchEnd = useCallback(() => {
+  const handleTouchEnd = useCallback((e: TouchEvent) => {
+    const prevMode = touchRef.current.mode
     touchRef.current.mode = 'none'
+
+    // Double-tap to show keyboard: detect two clean taps within 350ms
+    if (prevMode === 'scroll' && e.changedTouches.length === 1) {
+      const tap = tapRef.current
+      const touch = e.changedTouches[0]
+      const dx = Math.abs(touch.clientX - tap.startX)
+      const dy = Math.abs(touch.clientY - tap.startY)
+      const dt = Date.now() - tap.startTime
+
+      // Clean tap: < 10px movement, < 500ms duration
+      if (dx < 10 && dy < 10 && dt < 500) {
+        const now = Date.now()
+        if (now - lastTapTimeRef.current < 500) {
+          lastTapTimeRef.current = 0
+          const textarea = xtermTextareaRef.current
+          if (textarea) {
+            const isOpen = !textarea.getAttribute('inputmode')
+            if (isOpen) {
+              textarea.setAttribute('inputmode', 'none')
+              textarea.blur()
+            } else {
+              textarea.removeAttribute('inputmode')
+              textarea.blur()
+              textarea.focus({ preventScroll: true })
+            }
+          }
+        } else {
+          // First tap — record time
+          lastTapTimeRef.current = now
+        }
+      }
+    }
   }, [])
 
   useEffect(() => {
@@ -338,7 +373,7 @@ export const Terminal = () => {
             if (p === 1006) mouseStateRef.current.sgrMode = true
             if (p === 1049 || p === 47) {
               predictiveEchoRef.current?.setAltScreen(true)
-              setMobileKeyboardLockedRef.current(true)
+              xtermTextareaRef.current?.blur()
             }
           }
         }
@@ -532,23 +567,6 @@ export const Terminal = () => {
       term.dispose()
     }
   }, [subscribeOutput, sendInput, sendControl, resize, handleResize, debouncedResize, handleTouchStart, handleTouchMove, handleTouchEnd])
-
-  useEffect(() => {
-    const textarea = xtermTextareaRef.current
-    if (!textarea) return
-    const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)
-    if (!isTouchDevice) return
-
-    if (mobileKeyboardLocked) {
-      textarea.setAttribute('inputmode', 'none')
-      if (document.activeElement === textarea) {
-        textarea.blur()
-      }
-    } else {
-      textarea.removeAttribute('inputmode')
-      textarea.focus({ preventScroll: true })
-    }
-  }, [mobileKeyboardLocked])
 
   const zoomPercent = Math.round((fontSize / DEFAULT_FONT_SIZE) * 100)
 
