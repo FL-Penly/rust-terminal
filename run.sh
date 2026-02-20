@@ -41,9 +41,16 @@ echo "  Command: $CMD"
 echo "  Port: $PORT"
 echo ""
 echo "  Access URLs:"
-hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | while read ip; do
-    echo "    http://$ip:$PORT"
-done
+echo "    http://localhost:$PORT"
+if [[ "$(uname)" == "Darwin" ]]; then
+    ipconfig getifaddr en0 2>/dev/null | while read ip; do
+        echo "    http://$ip:$PORT"
+    done
+else
+    hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | while read ip; do
+        echo "    http://$ip:$PORT"
+    done
+fi
 echo ""
 echo "  Stop: pkill -f 'rust-terminal.*--port $PORT'"
 echo "=========================================="
