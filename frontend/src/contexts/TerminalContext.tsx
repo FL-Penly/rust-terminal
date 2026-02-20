@@ -180,8 +180,8 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       if (wasReconnect) {
         isReconnectRef.current = false
-        restoreTmuxSession(ws)
       }
+      restoreTmuxSession(ws)
     }
 
     ws.onmessage = (event) => {

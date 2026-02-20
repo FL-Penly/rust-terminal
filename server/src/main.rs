@@ -303,6 +303,11 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     // Client TTY tracking
     let client_tty_shared = state.client_tty.clone();
 
+    // Per-connection tty tracking (for safe cleanup independent of global state)
+    // Prevents race condition where a new connection's tty gets detached by old cleanup.
+    let connection_tty: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let connection_tty_sender = connection_tty.clone();
+
     // ── FRAME MERGING: WebSocket sender task ──
     // Collect PTY output and flush every 16ms (instead of per-byte like ttyd)
     let sender_task = tokio::spawn(async move {
@@ -325,10 +330,13 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                         if let Some(end) = after.find('\\') {
                                             let tty = after[..end].trim_end_matches('\x1b');
                                             if tty.starts_with("/dev/pts/") {
-                                                if let Ok(mut lock) = client_tty_shared.lock() {
-                                                    *lock = Some(tty.to_string());
-                                                }
-                                                tty_detected = true;
+                                if let Ok(mut lock) = client_tty_shared.lock() {
+                                    *lock = Some(tty.to_string());
+                                }
+                                if let Ok(mut lock) = connection_tty_sender.lock() {
+                                    *lock = Some(tty.to_string());
+                                }
+                                tty_detected = true;
                                             }
                                         }
                                     }
@@ -436,14 +444,19 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
 
     // Gracefully detach tmux client before the child process is killed,
     // preventing SIGHUP cascade that can destroy tmux sessions.
-    if let Ok(mut lock) = state.client_tty.lock() {
-        if let Some(ref tty) = *lock {
-            if let Err(e) = run_cmd("tmux", &["detach-client", "-t", tty]) {
-                tracing::warn!("tmux detach-client failed: {}", e);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+    // Use per-connection tty (not global) to avoid race with concurrent connections.
+    let cleanup_tty = connection_tty.lock().ok().and_then(|lock| lock.clone());
+    if let Some(ref tty) = cleanup_tty {
+        if let Err(e) = run_cmd("tmux", &["detach-client", "-t", tty]) {
+            tracing::warn!("tmux detach-client failed: {}", e);
         }
-        *lock = None;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Only clear global tty if it still belongs to this connection (compare-and-swap)
+    if let Ok(mut lock) = state.client_tty.lock() {
+        if *lock == cleanup_tty {
+            *lock = None;
+        }
     }
 
     let _ = reader_handle;
