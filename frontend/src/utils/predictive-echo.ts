@@ -12,6 +12,7 @@ export class PredictiveEcho {
   private term: Terminal
   private predicted: string[] = []
   private _enabled = false
+  private altScreen = false
 
   constructor(term: Terminal) {
     this.term = term
@@ -26,8 +27,18 @@ export class PredictiveEcho {
     if (!value) this.reset()
   }
 
+  setAltScreen(active: boolean): void {
+    this.altScreen = active
+    if (active) this.reset()
+  }
+
   handleInput(data: string): void {
-    if (!this._enabled) return
+    if (!this._enabled || this.altScreen) return
+
+    if (data.length > 1) {
+      this.reset()
+      return
+    }
 
     for (const char of data) {
       if (char === '\r' || char === '\n') {

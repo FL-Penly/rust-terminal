@@ -4,6 +4,7 @@ server/target/
 
 # Frontend
 frontend/node_modules/
+node_modules/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts

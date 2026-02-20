@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react'
 
 export interface TerminalContextValue {
   connectionState: 'connecting' | 'connected' | 'disconnected' | 'reconnecting'
@@ -376,20 +376,22 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [])
 
+  const contextValue = useMemo(() => ({
+    connectionState,
+    sendInput,
+    sendKey,
+    subscribeOutput,
+    sendControl,
+    terminalRef,
+    resize,
+    reconnect,
+    reconnectAttempt,
+    clientTty,
+    setClientTty: setClientTtyValue,
+  }), [connectionState, sendInput, sendKey, subscribeOutput, sendControl, terminalRef, resize, reconnect, reconnectAttempt, clientTty, setClientTtyValue])
+
   return (
-    <TerminalContext.Provider value={{
-      connectionState,
-      sendInput,
-      sendKey,
-      subscribeOutput,
-      sendControl,
-      terminalRef,
-      resize,
-      reconnect,
-      reconnectAttempt,
-      clientTty,
-      setClientTty: setClientTtyValue,
-    }}>
+    <TerminalContext.Provider value={contextValue}>
       {children}
     </TerminalContext.Provider>
   )

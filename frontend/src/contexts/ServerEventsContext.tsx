@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import type { TmuxSession } from '../hooks/useTmuxSessions'
 import { useTerminal } from './TerminalContext'
 
@@ -149,17 +149,19 @@ export const ServerEventsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     }
   }, [clientTty, applyData, startPolling, stopPolling])
 
+  const contextValue = useMemo(() => ({
+    branch,
+    path,
+    tmuxSessions,
+    currentTmuxSession,
+    isOffline,
+    clientTty,
+    sessionsLoaded,
+    refresh,
+  }), [branch, path, tmuxSessions, currentTmuxSession, isOffline, clientTty, sessionsLoaded, refresh])
+
   return (
-    <ServerEventsContext.Provider value={{
-      branch,
-      path,
-      tmuxSessions,
-      currentTmuxSession,
-      isOffline,
-      clientTty,
-      sessionsLoaded,
-      refresh,
-    }}>
+    <ServerEventsContext.Provider value={contextValue}>
       {children}
     </ServerEventsContext.Provider>
   )

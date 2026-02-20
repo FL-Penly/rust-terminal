@@ -46,6 +46,9 @@ export const Terminal = () => {
   const mouseStateRef = useRef({ mouseTracking: false, sgrMode: false })
   const [showCopied, setShowCopied] = useState(false)
   const copiedTimerRef = useRef<number | null>(null)
+  const xtermScreenRef = useRef<HTMLElement | null>(null)
+  const pinchWriteTimerRef = useRef<number | null>(null)
+  const pinchResizeTimerRef = useRef<number | null>(null)
 
   useEffect(() => { sendInputRef.current = sendInput }, [sendInput])
 
@@ -59,7 +62,7 @@ export const Terminal = () => {
 
   const debouncedResize = useCallback(() => {
     if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
-    resizeTimerRef.current = window.setTimeout(handleResize, 150)
+    resizeTimerRef.current = window.setTimeout(handleResize, 60)
   }, [handleResize])
 
   const updateFontSize = useCallback((newSize: number) => {
@@ -68,8 +71,21 @@ export const Terminal = () => {
       termRef.current.options.fontSize = clampedSize
       setFontSize(clampedSize)
       fontSizeRef.current = clampedSize
-      localStorage.setItem('terminal_font_size', String(clampedSize))
-      handleResize()
+      
+      // Debounce localStorage write — only persist after 500ms idle
+      if (pinchWriteTimerRef.current) clearTimeout(pinchWriteTimerRef.current)
+      pinchWriteTimerRef.current = window.setTimeout(() => {
+        localStorage.setItem('terminal_font_size', String(clampedSize))
+      }, 500)
+      
+      // Throttle resize — at most every 100ms during pinch
+      if (!pinchResizeTimerRef.current) {
+        handleResize()
+        pinchResizeTimerRef.current = window.setTimeout(() => {
+          pinchResizeTimerRef.current = null
+        }, 100)
+      }
+      
       setShowZoom(true)
       if (zoomTimerRef.current) clearTimeout(zoomTimerRef.current)
       zoomTimerRef.current = window.setTimeout(() => setShowZoom(false), 1200)
@@ -120,8 +136,8 @@ export const Terminal = () => {
         t.lastY = y
         t.accumDelta += delta
 
-        const screenEl = containerRef.current?.querySelector('.xterm-screen') as HTMLElement | null
-        if (!screenEl) return
+       const screenEl = xtermScreenRef.current
+         if (!screenEl) return
 
         const rect = screenEl.getBoundingClientRect()
         const cellHeight = rect.height / term.rows
@@ -181,7 +197,7 @@ export const Terminal = () => {
         brightCyan: '#56d4dd',
         brightWhite: '#f0f6fc',
       },
-      scrollback: 1000,
+      scrollback: 5000,
       cursorBlink: true,
       allowProposedApi: true,
       macOptionClickForcesSelection: true,
@@ -189,7 +205,7 @@ export const Terminal = () => {
     termRef.current = term
 
     const predictiveEcho = new PredictiveEcho(term)
-    predictiveEcho.enabled = localStorage.getItem('terminal_predictive_echo') === 'on'
+    predictiveEcho.enabled = localStorage.getItem('terminal_predictive_echo') !== 'off'
     predictiveEchoRef.current = predictiveEcho
 
     // Load FitAddon
@@ -223,6 +239,7 @@ export const Terminal = () => {
     term.open(containerRef.current)
 
     const xtermScreen = containerRef.current.querySelector('.xterm-screen') as HTMLElement | null
+    xtermScreenRef.current = xtermScreen
     let pendingMouseDown: MouseEvent | null = null
     let isDragging = false
     const DRAG_THRESHOLD = 4
@@ -308,6 +325,7 @@ export const Terminal = () => {
           if (typeof p === 'number') {
             if (p === 1000 || p === 1002 || p === 1003) mouseStateRef.current.mouseTracking = true
             if (p === 1006) mouseStateRef.current.sgrMode = true
+            if (p === 1049 || p === 47) predictiveEchoRef.current?.setAltScreen(true)
           }
         }
         return false
@@ -321,6 +339,7 @@ export const Terminal = () => {
           if (typeof p === 'number') {
             if (p === 1000 || p === 1002 || p === 1003) mouseStateRef.current.mouseTracking = false
             if (p === 1006) mouseStateRef.current.sgrMode = false
+            if (p === 1049 || p === 47) predictiveEchoRef.current?.setAltScreen(false)
           }
         }
         return false
@@ -490,6 +509,8 @@ export const Terminal = () => {
       }
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
       if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+      if (pinchWriteTimerRef.current) clearTimeout(pinchWriteTimerRef.current)
+      if (pinchResizeTimerRef.current) clearTimeout(pinchResizeTimerRef.current)
       container.removeEventListener('touchstart', handleTouchStart)
       container.removeEventListener('touchmove', handleTouchMove)
       container.removeEventListener('touchend', handleTouchEnd)

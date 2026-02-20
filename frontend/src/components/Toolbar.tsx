@@ -167,12 +167,12 @@ export const Toolbar: React.FC = () => {
   )
 }
 
-const btnBase = 'min-h-[36px] flex items-center justify-center rounded-lg shadow-sm border border-border-subtle text-sm font-mono active:scale-95 active:bg-accent-blue/20 transition-all whitespace-nowrap select-none'
+const btnBase = 'min-h-[36px] flex items-center justify-center rounded-lg shadow-sm border border-border-subtle text-sm font-mono active:scale-95 active:bg-accent-blue/20 transition-transform duration-100 whitespace-nowrap select-none'
 
 const Toggle: React.FC<{ expanded: boolean; onClick: () => void }> = ({ expanded, onClick }) => (
   <button
     onClick={onClick}
-    className={`min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg shadow-sm border text-sm active:scale-95 transition-all shrink-0 select-none ${
+    className={`min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg shadow-sm border text-sm active:scale-95 transition-transform duration-100 shrink-0 select-none ${
       expanded
         ? 'bg-accent-blue/20 border-accent-blue text-accent-blue'
         : 'bg-bg-tertiary/50 border-border-subtle text-text-secondary'

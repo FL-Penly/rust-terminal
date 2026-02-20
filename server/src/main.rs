@@ -23,7 +23,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command as StdCommand,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
 use tokio::sync::mpsc;
@@ -286,13 +286,30 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     // Keep master alive for resize
     let master = Arc::new(Mutex::new(pair.master));
 
+    // Flow control: shared pause signal between PTY reader thread and WebSocket receiver
+    let paused = Arc::new((Mutex::new(false), Condvar::new()));
+    let paused_reader = paused.clone();
+
     // Channel: PTY output → WebSocket sender
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     // PTY reader thread (blocking I/O → separate thread)
     let reader_handle = std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; 32768];
         loop {
+            // Flow control: wait if paused (auto-resume after 2s)
+            {
+                let (lock, cvar) = &*paused_reader;
+                let mut is_paused = lock.lock().unwrap();
+                if *is_paused {
+                    let result = cvar.wait_timeout(is_paused, Duration::from_secs(2)).unwrap();
+                    is_paused = result.0;
+                    if *is_paused {
+                        tracing::warn!("Flow control: auto-resuming after 2s timeout");
+                        *is_paused = false;
+                    }
+                }
+            }
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -313,28 +330,23 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     let connection_tty: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let connection_tty_sender = connection_tty.clone();
 
-    // ── FRAME MERGING: WebSocket sender task ──
-    // Collect PTY output and flush every 16ms (instead of per-byte like ttyd)
+    // ── ADAPTIVE BATCHING: WebSocket sender task ──
+    // Adaptive batching: 4ms idle flush, 32KB cap.
     let sender_task = tokio::spawn(async move {
         let mut buffer = BytesMut::with_capacity(16384);
-        let mut interval = tokio::time::interval(Duration::from_millis(16));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut tty_detected = false;
 
         loop {
-            tokio::select! {
-                // Collect PTY output into buffer
-                data = output_rx.recv() => {
-                    match data {
-                        Some(bytes) => {
-                            // Detect client TTY from OSC 7337 in output
-                            if !tty_detected {
-                                if let Ok(text) = std::str::from_utf8(&bytes) {
-                                    if let Some(pos) = text.find("]7337;") {
-                                        let after = &text[pos + 6..];
-                                        if let Some(end) = after.find('\\') {
-                                            let tty = after[..end].trim_end_matches('\x1b');
-                                            if tty.starts_with("/dev/pts/") {
+            let data = output_rx.recv().await;
+            match data {
+                Some(bytes) => {
+                    if !tty_detected {
+                        if let Ok(text) = std::str::from_utf8(&bytes) {
+                            if let Some(pos) = text.find("]7337;") {
+                                let after = &text[pos + 6..];
+                                if let Some(end) = after.find('\\') {
+                                    let tty = after[..end].trim_end_matches('\x1b');
+                                    if tty.starts_with("/dev/pts/") {
                                 if let Ok(mut lock) = client_tty_shared.lock() {
                                     *lock = Some(tty.to_string());
                                 }
@@ -342,36 +354,79 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                     *lock = Some(tty.to_string());
                                 }
                                 tty_detected = true;
-                                            }
-                                        }
                                     }
                                 }
                             }
-                            buffer.extend_from_slice(&bytes);
-                        }
-                        None => {
-                            // PTY closed — flush remaining and exit
-                            if !buffer.is_empty() {
-                                let mut frame = Vec::with_capacity(buffer.len() + 1);
-                                frame.push(0x30); // ttyd output prefix
-                                frame.extend_from_slice(&buffer);
-                                let _ = ws_sender.send(Message::Binary(frame.into())).await;
-                            }
-                            break;
                         }
                     }
-                }
-                // Flush buffer every 16ms
-                _ = interval.tick() => {
+                    buffer.extend_from_slice(&bytes);
+
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(4);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            more = output_rx.recv() => {
+                                match more {
+                                    Some(more_bytes) => {
+                                        if !tty_detected {
+                                            if let Ok(text) = std::str::from_utf8(&more_bytes) {
+                                                if let Some(pos) = text.find("]7337;") {
+                                                    let after = &text[pos + 6..];
+                                                    if let Some(end) = after.find('\\') {
+                                                        let tty = after[..end].trim_end_matches('\x1b');
+                                                        if tty.starts_with("/dev/pts/") {
+                                if let Ok(mut lock) = client_tty_shared.lock() {
+                                    *lock = Some(tty.to_string());
+                                }
+                                if let Ok(mut lock) = connection_tty_sender.lock() {
+                                    *lock = Some(tty.to_string());
+                                }
+                                tty_detected = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        buffer.extend_from_slice(&more_bytes);
+                                        if buffer.len() > 32768 {
+                                            break;
+                                        }
+                                    }
+                                    None => {
+                                        if !buffer.is_empty() {
+                                            let mut frame = Vec::with_capacity(buffer.len() + 1);
+                                            frame.push(0x30);
+                                            frame.extend_from_slice(&buffer);
+                                            let _ = ws_sender.send(Message::Binary(frame.into())).await;
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            _ = tokio::time::sleep_until(deadline) => {
+                                break;
+                            }
+                        }
+                    }
+
                     if !buffer.is_empty() {
                         let mut frame = Vec::with_capacity(buffer.len() + 1);
-                        frame.push(0x30); // ttyd output prefix: '0'
+                        frame.push(0x30); // ttyd output prefix
                         frame.extend_from_slice(&buffer);
                         buffer.clear();
                         if ws_sender.send(Message::Binary(frame.into())).await.is_err() {
                             break;
                         }
                     }
+                }
+                None => {
+                    if !buffer.is_empty() {
+                        let mut frame = Vec::with_capacity(buffer.len() + 1);
+                        frame.push(0x30);
+                        frame.extend_from_slice(&buffer);
+                        let _ = ws_sender.send(Message::Binary(frame.into())).await;
+                    }
+                    break;
                 }
             }
         }
@@ -380,6 +435,7 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     // ── WebSocket receiver task: client → PTY ──
     let pty_writer_recv = pty_writer.clone();
     let master_recv = master.clone();
+    let paused_recv = paused.clone();
 
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -416,10 +472,21 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                 }
                             }
                         }
-                        // 0x32 = flow control: pause (currently no-op)
-                        0x32 => {}
-                        // 0x33 = flow control: resume (currently no-op)
-                        0x33 => {}
+                        // 0x32 = flow control: pause
+                        0x32 => {
+                            let (lock, _cvar) = &*paused_recv;
+                            if let Ok(mut is_paused) = lock.lock() {
+                                *is_paused = true;
+                            }
+                        }
+                        // 0x33 = flow control: resume
+                        0x33 => {
+                            let (lock, cvar) = &*paused_recv;
+                            if let Ok(mut is_paused) = lock.lock() {
+                                *is_paused = false;
+                                cvar.notify_one();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -445,6 +512,15 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     tokio::select! {
         _ = sender_task => {},
         _ = recv_task => {},
+    }
+
+    // Ensure PTY reader thread is unpaused so it can exit cleanly
+    {
+        let (lock, cvar) = &*paused;
+        if let Ok(mut is_paused) = lock.lock() {
+            *is_paused = false;
+            cvar.notify_one();
+        }
     }
 
     // Gracefully detach tmux client before the child process is killed,

@@ -62,6 +62,7 @@
    and our handler handles pinch-to-zoom. */
 .xterm-screen {
   touch-action: none;
+  contain: strict;
 }
 
 @layer utilities {
