@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
+
 import '@xterm/xterm/css/xterm.css'
 import { useTerminal } from '../contexts/TerminalContext'
 import { PredictiveEcho } from '../utils/predictive-echo'
@@ -45,6 +46,8 @@ export const Terminal = () => {
   const predictiveEchoRef = useRef<PredictiveEcho | null>(null)
   const sendInputRef = useRef(sendInput)
   const mouseStateRef = useRef({ mouseTracking: false, sgrMode: false })
+  const selectionPolicyRef = useRef<'local' | 'pty'>('local')
+  const clientTtyValueRef = useRef<string | null>(null)
   const [showCopied, setShowCopied] = useState(false)
   const copiedTimerRef = useRef<number | null>(null)
   const xtermScreenRef = useRef<HTMLElement | null>(null)
@@ -218,7 +221,7 @@ export const Terminal = () => {
         foreground: '#e6edf3',
         cursor: '#58a6ff',
         cursorAccent: '#0d1117',
-        selectionBackground: 'rgba(163, 113, 247, 0.3)',
+        selectionBackground: 'rgba(163, 113, 247, 0.5)',
         black: '#484f58',
         red: '#f85149',
         green: '#3fb950',
@@ -241,6 +244,9 @@ export const Terminal = () => {
       allowProposedApi: true,
       rescaleOverlappingGlyphs: true,
       macOptionClickForcesSelection: true,
+      smoothScrollDuration: 0,
+      fastScrollSensitivity: 5,
+      overviewRulerWidth: 0,
     })
     termRef.current = term
 
@@ -256,7 +262,6 @@ export const Terminal = () => {
     const unicode11Addon = new Unicode11Addon()
     term.loadAddon(unicode11Addon)
     term.unicode.activeVersion = '11'
-
     let renderer: 'webgl' | 'canvas' | 'dom' = 'dom'
     try {
       const webglAddon = new WebglAddon()
@@ -292,6 +297,7 @@ export const Terminal = () => {
 
     const xtermScreen = containerRef.current.querySelector('.xterm-screen') as HTMLElement | null
     xtermScreenRef.current = xtermScreen
+
     let pendingMouseDown: MouseEvent | null = null
     let isDragging = false
     const DRAG_THRESHOLD = 4
@@ -312,9 +318,35 @@ export const Terminal = () => {
       return clone
     }
 
+    const sendSyntheticMouseToPty = (e: MouseEvent, type: 'down' | 'move' | 'up') => {
+      if (!xtermScreen) return
+      const rect = xtermScreen.getBoundingClientRect()
+      const col = Math.max(1, Math.min(term.cols, Math.floor((e.clientX - rect.left) / (rect.width / term.cols)) + 1))
+      const row = Math.max(1, Math.min(term.rows, Math.floor((e.clientY - rect.top) / (rect.height / term.rows)) + 1))
+      const btn = type === 'move' ? 32 : 0
+      if (mouseStateRef.current.sgrMode) {
+        sendInputRef.current(`\x1b[<${btn};${col};${row}${type === 'up' ? 'm' : 'M'}`)
+      } else if (col <= 223 && row <= 223) {
+        sendInputRef.current(`\x1b[M${String.fromCharCode(32 + btn)}${String.fromCharCode(32 + col)}${String.fromCharCode(32 + row)}`)
+      }
+    }
+
+    let policyPollId: number | null = null
+
+    const fetchSelectionPolicy = () => {
+      const tty = clientTtyValueRef.current
+      const params = tty ? `?client_tty=${encodeURIComponent(tty)}` : ''
+      void fetch(`/api/tmux/pane-mode${params}`, { signal: AbortSignal.timeout(500) })
+        .then(r => r.json() as Promise<{ tuiActive: boolean }>)
+        .then(data => { selectionPolicyRef.current = data.tuiActive ? 'pty' : 'local' })
+        .catch(() => {})
+    }
+
+    let currentDragMode: 'local' | 'pty' = 'local'
+
     const onMouseDownCapture = (e: MouseEvent) => {
       if (patchedMouseEvents.has(e) || !mouseStateRef.current.mouseTracking || e.button !== 0) return
-      if (isMac ? (e.altKey) : (e.shiftKey)) return
+      if (isMac ? e.altKey : e.shiftKey) return
       e.stopImmediatePropagation()
       e.preventDefault()
       pendingMouseDown = e
@@ -330,17 +362,26 @@ export const Terminal = () => {
         const dy = e.clientY - pendingMouseDown.clientY
         if (dx * dx + dy * dy < DRAG_THRESHOLD * DRAG_THRESHOLD) return
         isDragging = true
-        pendingMouseDown.target?.dispatchEvent(cloneMouseEvent(pendingMouseDown, forceSelectModifier))
+        currentDragMode = selectionPolicyRef.current
+        if (currentDragMode === 'local') {
+          pendingMouseDown.target?.dispatchEvent(cloneMouseEvent(pendingMouseDown, forceSelectModifier))
+        } else {
+          sendSyntheticMouseToPty(pendingMouseDown, 'down')
+        }
       }
-      const moveClone = new MouseEvent('mousemove', {
-        bubbles: true, cancelable: true, view: e.view,
-        screenX: e.screenX, screenY: e.screenY, clientX: e.clientX, clientY: e.clientY,
-        button: e.button, buttons: e.buttons,
-        ctrlKey: e.ctrlKey, altKey: e.altKey, metaKey: e.metaKey, shiftKey: e.shiftKey,
-        ...forceSelectModifier,
-      })
-      patchedMouseEvents.add(moveClone)
-      e.target?.dispatchEvent(moveClone)
+      if (currentDragMode === 'local') {
+        const moveClone = new MouseEvent('mousemove', {
+          bubbles: true, cancelable: true, view: e.view,
+          screenX: e.screenX, screenY: e.screenY, clientX: e.clientX, clientY: e.clientY,
+          button: e.button, buttons: e.buttons,
+          ctrlKey: e.ctrlKey, altKey: e.altKey, metaKey: e.metaKey, shiftKey: e.shiftKey,
+          ...forceSelectModifier,
+        })
+        patchedMouseEvents.add(moveClone)
+        e.target?.dispatchEvent(moveClone)
+      } else {
+        sendSyntheticMouseToPty(e, 'move')
+      }
     }
 
     const onMouseUpCapture = (e: MouseEvent) => {
@@ -348,7 +389,11 @@ export const Terminal = () => {
       e.stopImmediatePropagation()
       e.preventDefault()
       if (isDragging) {
-        e.target?.dispatchEvent(cloneMouseEvent(e, forceSelectModifier))
+        if (currentDragMode === 'local') {
+          e.target?.dispatchEvent(cloneMouseEvent(e, forceSelectModifier))
+        } else {
+          sendSyntheticMouseToPty(e, 'up')
+        }
       } else {
         pendingMouseDown.target?.dispatchEvent(cloneMouseEvent(pendingMouseDown))
         e.target?.dispatchEvent(cloneMouseEvent(e))
@@ -364,7 +409,10 @@ export const Terminal = () => {
     }
 
     const oscDisposable = term.parser.registerOscHandler(7337, (data) => {
-      if (data) setClientTtyRef.current(data)
+      if (data) {
+        clientTtyValueRef.current = data
+        setClientTtyRef.current(data)
+      }
       return false
     })
 
@@ -375,7 +423,13 @@ export const Terminal = () => {
         for (let i = 0; i < params.length; i++) {
           const p = params[i]
           if (typeof p === 'number') {
-            if (p === 1000 || p === 1002 || p === 1003) mouseStateRef.current.mouseTracking = true
+            if (p === 1000 || p === 1002 || p === 1003) {
+              mouseStateRef.current.mouseTracking = true
+              if (policyPollId === null) {
+                fetchSelectionPolicy()
+                policyPollId = window.setInterval(fetchSelectionPolicy, 300)
+              }
+            }
             if (p === 1006) mouseStateRef.current.sgrMode = true
             if (p === 1049 || p === 47) {
               predictiveEchoRef.current?.setAltScreen(true)
@@ -392,7 +446,13 @@ export const Terminal = () => {
         for (let i = 0; i < params.length; i++) {
           const p = params[i]
           if (typeof p === 'number') {
-            if (p === 1000 || p === 1002 || p === 1003) mouseStateRef.current.mouseTracking = false
+            if (p === 1000 || p === 1002 || p === 1003) {
+              mouseStateRef.current.mouseTracking = false
+              if (policyPollId !== null) {
+                window.clearInterval(policyPollId)
+                policyPollId = null
+              }
+            }
             if (p === 1006) mouseStateRef.current.sgrMode = false
             if (p === 1049 || p === 47) predictiveEchoRef.current?.setAltScreen(false)
           }
@@ -431,6 +491,24 @@ export const Terminal = () => {
       return true
     })
     const kittyPopDisposable = term.parser.registerCsiHandler({ prefix: '<', final: 'u' }, () => {
+      return true
+    })
+
+    const osc52Disposable = term.parser.registerOscHandler(52, (data) => {
+      const semi = data.indexOf(';')
+      if (semi < 0) return true
+      const b64 = data.slice(semi + 1)
+      if (!b64 || b64 === '?') return true
+      try {
+        const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0))
+        const text = new TextDecoder().decode(bytes)
+        if (!text) return true
+        if (window.isSecureContext && navigator.clipboard?.writeText) {
+          void navigator.clipboard.writeText(text)
+        } else {
+          fallbackCopy(text)
+        }
+      } catch {}
       return true
     })
 
@@ -568,6 +646,7 @@ export const Terminal = () => {
     window.addEventListener('terminal-copy-viewport', handleCopyViewport)
 
     return () => {
+      if (policyPollId !== null) window.clearInterval(policyPollId)
       unsubscribe()
       dataDisposable.dispose()
       oscDisposable.dispose()
@@ -576,6 +655,8 @@ export const Terminal = () => {
       kittyQueryDisposable.dispose()
       kittyPushDisposable.dispose()
       kittyPopDisposable.dispose()
+      osc52Disposable.dispose()
+
       window.removeEventListener('predictive-echo-changed', handlePredictiveEchoChanged)
       window.removeEventListener('resize', debouncedResize)
       vv?.removeEventListener('resize', debouncedResize)

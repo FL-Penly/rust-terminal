@@ -9,9 +9,10 @@ use axum::{
         IntoResponse, Response,
     },
     routing::{any, get, post},
+    serve::ListenerExt,
     Json, Router,
 };
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -85,7 +86,16 @@ async fn main() {
     print_access_urls(cli.port);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener.tap_io(|stream| {
+            if let Err(e) = stream.set_nodelay(true) {
+                tracing::warn!("Failed to set TCP_NODELAY: {}", e);
+            }
+        }),
+        app,
+    )
+    .await
+    .unwrap();
 }
 
 fn print_access_urls(port: u16) {
@@ -138,6 +148,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/tmux/create", get(api_tmux_create))
         .route("/api/tmux/kill", get(api_tmux_kill))
         .route("/api/tmux/detach", get(api_tmux_detach))
+        .route("/api/tmux/pane-mode", get(api_tmux_pane_mode))
         .route("/api/events", get(api_events))
         .route("/api/upload-image", post(api_upload_image))
         // Static file serving — catch-all for frontend
@@ -290,12 +301,12 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     let paused = Arc::new((Mutex::new(false), Condvar::new()));
     let paused_reader = paused.clone();
 
-    // Channel: PTY output → WebSocket sender
-    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // Channel: PTY output → WebSocket sender (bounded to prevent OOM under slow clients)
+    let (output_tx, mut output_rx) = mpsc::channel::<Vec<u8>>(256);
 
     // PTY reader thread (blocking I/O → separate thread)
     let reader_handle = std::thread::spawn(move || {
-        let mut buf = [0u8; 32768];
+        let mut buf = [0u8; 65536];
         loop {
             // Flow control: wait if paused (auto-resume after 2s)
             {
@@ -313,7 +324,7 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
             match pty_reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if output_tx.send(buf[..n].to_vec()).is_err() {
+                    if output_tx.blocking_send(buf[..n].to_vec()).is_err() {
                         break;
                     }
                 }
@@ -333,7 +344,8 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
     // ── ADAPTIVE BATCHING: WebSocket sender task ──
     // Adaptive batching: 4ms idle flush, 32KB cap.
     let sender_task = tokio::spawn(async move {
-        let mut buffer = BytesMut::with_capacity(16384);
+        let mut buffer = BytesMut::with_capacity(32768);
+        let mut frame_buf = BytesMut::with_capacity(65537);
         let mut tty_detected = false;
 
         loop {
@@ -361,7 +373,7 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                     }
                     buffer.extend_from_slice(&bytes);
 
-                    let deadline = tokio::time::Instant::now() + Duration::from_millis(4);
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(2);
                     loop {
                         tokio::select! {
                             biased;
@@ -388,16 +400,16 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                             }
                                         }
                                         buffer.extend_from_slice(&more_bytes);
-                                        if buffer.len() > 32768 {
+                                        if buffer.len() > 65536 {
                                             break;
                                         }
                                     }
                                     None => {
                                         if !buffer.is_empty() {
-                                            let mut frame = Vec::with_capacity(buffer.len() + 1);
-                                            frame.push(0x30);
-                                            frame.extend_from_slice(&buffer);
-                                            let _ = ws_sender.send(Message::Binary(frame.into())).await;
+                                            frame_buf.clear();
+                                            frame_buf.put_u8(0x30);
+                                            frame_buf.extend_from_slice(&buffer);
+                                            let _ = ws_sender.send(Message::Binary(frame_buf.split().freeze())).await;
                                         }
                                         return;
                                     }
@@ -410,21 +422,21 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                     }
 
                     if !buffer.is_empty() {
-                        let mut frame = Vec::with_capacity(buffer.len() + 1);
-                        frame.push(0x30); // ttyd output prefix
-                        frame.extend_from_slice(&buffer);
+                        frame_buf.clear();
+                        frame_buf.put_u8(0x30);
+                        frame_buf.extend_from_slice(&buffer);
                         buffer.clear();
-                        if ws_sender.send(Message::Binary(frame.into())).await.is_err() {
+                        if ws_sender.send(Message::Binary(frame_buf.split().freeze())).await.is_err() {
                             break;
                         }
                     }
                 }
                 None => {
                     if !buffer.is_empty() {
-                        let mut frame = Vec::with_capacity(buffer.len() + 1);
-                        frame.push(0x30);
-                        frame.extend_from_slice(&buffer);
-                        let _ = ws_sender.send(Message::Binary(frame.into())).await;
+                        frame_buf.clear();
+                        frame_buf.put_u8(0x30);
+                        frame_buf.extend_from_slice(&buffer);
+                        let _ = ws_sender.send(Message::Binary(frame_buf.split().freeze())).await;
                     }
                     break;
                 }
@@ -597,7 +609,10 @@ printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
     tmux set -g window-size latest 2>/dev/null
     tmux set -g extended-keys always 2>/dev/null
+    tmux set -g set-clipboard on 2>/dev/null
+    tmux set -g allow-passthrough on 2>/dev/null
     tmux bind-key -n S-Enter send-keys -l $'\033[13;2u' 2>/dev/null
+    tmux unbind -T root MouseDrag1Pane 2>/dev/null
     tmux attach
 fi
 ZDOTDIR={} exec {}
@@ -623,7 +638,10 @@ printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
     tmux set -g window-size latest 2>/dev/null
     tmux set -g extended-keys always 2>/dev/null
+    tmux set -g set-clipboard on 2>/dev/null
+    tmux set -g allow-passthrough on 2>/dev/null
     tmux bind-key -n S-Enter send-keys -l $'\033[13;2u' 2>/dev/null
+    tmux unbind -T root MouseDrag1Pane 2>/dev/null
     tmux attach
 fi
 exec bash --rcfile /tmp/rust_terminal_bashrc
@@ -640,7 +658,10 @@ printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
     tmux set -g window-size latest 2>/dev/null
     tmux set -g extended-keys always 2>/dev/null
+    tmux set -g set-clipboard on 2>/dev/null
+    tmux set -g allow-passthrough on 2>/dev/null
     tmux bind-key -n S-Enter send-keys -l $'\033[13;2u' 2>/dev/null
+    tmux unbind -T root MouseDrag1Pane 2>/dev/null
     tmux attach
 fi
 exec {}
@@ -961,9 +982,9 @@ fn parse_unified_diff(raw: &str, changed_files: &[ChangedFile]) -> DiffResult {
     };
 
     for line in raw.lines() {
-        if line.starts_with("+++ b/") {
+        if let Some(name) = line.strip_prefix("+++ b/") {
             if current_filename.is_empty() {
-                current_filename = line[6..].to_string();
+                current_filename = name.to_string();
             }
         } else if let Some(rest) = line.strip_prefix("--- a/") {
             flush_file(
@@ -1007,9 +1028,11 @@ fn parse_unified_diff(raw: &str, changed_files: &[ChangedFile]) -> DiffResult {
             file_adds = 0;
             file_dels = 0;
             is_binary = false;
-        } else if line.starts_with("diff --git") {
-            continue;
-        } else if line.starts_with("index ") || line.starts_with("new file") || line.starts_with("deleted file") {
+        } else if line.starts_with("diff --git")
+            || line.starts_with("index ")
+            || line.starts_with("new file")
+            || line.starts_with("deleted file")
+        {
             continue;
         } else if line.starts_with("Binary files") {
             is_binary = true;
@@ -1436,6 +1459,30 @@ async fn api_tmux_detach(
     }
 }
 
+// ─── GET /api/tmux/pane-mode ───────────────────────────────────────────────
+
+async fn api_tmux_pane_mode(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<TmuxQuery>,
+) -> Json<serde_json::Value> {
+    let client_tty = get_effective_client_tty(&state, query.client_tty);
+    let session = client_tty.as_deref().and_then(|t| get_current_tmux_session(Some(t)));
+
+    let tui_active = match session {
+        Some(ref sess) => run_cmd(
+            "tmux",
+            &["display-message", "-t", &format!("{}:", sess), "-p", "#{alternate_on}"],
+        )
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false),
+        None => run_cmd("tmux", &["display-message", "-p", "#{alternate_on}"])
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false),
+    };
+
+    Json(serde_json::json!({ "tuiActive": tui_active }))
+}
+
 // ─── GET /api/events (SSE) ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1670,5 +1717,92 @@ fn run_cmd_in(cmd: &str, args: &[&str], cwd: &str) -> Result<String, String> {
             }
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::ws::Message;
+
+    #[test]
+    fn test_parse_init_message_binary_valid() {
+        let json = r#"{"AuthToken":"","columns":120,"rows":40}"#;
+        let msg = Message::Binary(json.as_bytes().to_vec().into());
+        let (cols, rows) = parse_init_message(msg);
+        assert_eq!(cols, 120);
+        assert_eq!(rows, 40);
+    }
+
+    #[test]
+    fn test_parse_init_message_text_valid() {
+        let json = r#"{"AuthToken":"","columns":80,"rows":24}"#;
+        let msg = Message::Text(json.to_string().into());
+        let (cols, rows) = parse_init_message(msg);
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 24);
+    }
+
+    #[test]
+    fn test_parse_init_message_invalid_returns_defaults() {
+        let msg = Message::Binary(b"not json".to_vec().into());
+        let (cols, rows) = parse_init_message(msg);
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 24);
+    }
+
+    #[test]
+    fn test_parse_init_message_ping_returns_defaults() {
+        let msg = Message::Ping(vec![1, 2, 3].into());
+        let (cols, rows) = parse_init_message(msg);
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 24);
+    }
+
+    #[test]
+    fn test_output_frame_starts_with_0x30() {
+        let payload = b"hello world";
+        let mut frame = Vec::with_capacity(payload.len() + 1);
+        frame.push(0x30u8);
+        frame.extend_from_slice(payload);
+        assert_eq!(frame[0], 0x30);
+        assert_eq!(&frame[1..], payload);
+    }
+
+    #[test]
+    fn test_resize_message_deserialization() {
+        let json = r#"{"AuthToken":"","columns":100,"rows":30}"#;
+        let msg: ResizeMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.columns, 100);
+        assert_eq!(msg.rows, 30);
+    }
+
+    #[test]
+    fn test_resize_message_without_auth_token() {
+        let json = r#"{"columns":200,"rows":50}"#;
+        let msg: ResizeMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.columns, 200);
+        assert_eq!(msg.rows, 50);
+        assert!(msg.auth_token.is_none());
+    }
+
+    #[test]
+    fn test_init_message_deserialization() {
+        let json = r#"{"columns":120,"rows":40}"#;
+        let msg: InitMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.columns, 120);
+        assert_eq!(msg.rows, 40);
+    }
+
+    #[test]
+    fn test_bounded_channel_capacity() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        for i in 0..100u8 {
+            tx.send(vec![i]).unwrap();
+        }
     }
 }
