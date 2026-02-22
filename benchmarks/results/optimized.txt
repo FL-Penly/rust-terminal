@@ -1,0 +1,35 @@
+=== Web Terminal Performance Benchmark ===
+Timestamp: 2026-02-22T10:45:39Z
+Using isolated server on port 17682
+
+✓ Bench server started (pid 3885046)
+
+--- Throughput Test ---
+{
+  "test": "throughput",
+  "total_bytes": 3888911,
+  "elapsed_seconds": 0.784,
+  "throughput_mbs": 4.73
+}
+
+--- Latency Test ---
+{
+  "test": "latency",
+  "samples": 50,
+  "p50_ms": 6.18,
+  "p95_ms": 11.84,
+  "p99_ms": 15.85,
+  "min_ms": 4.21,
+  "max_ms": 15.85
+}
+
+--- Memory Test ---
+{
+  "test": "memory",
+  "initial_rss_mb": 5.6,
+  "peak_rss_mb": 5.7,
+  "final_rss_mb": 5.7,
+  "samples": 8
+}
+
+=== Benchmark Complete ===

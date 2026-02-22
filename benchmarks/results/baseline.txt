@@ -1,0 +1,30 @@
+=== Baseline Benchmark ===
+Timestamp: 2026-02-22T10:35:39Z
+
+--- Throughput ---
+{
+  "test": "throughput",
+  "total_bytes": 58279,
+  "elapsed_seconds": 11.331,
+  "throughput_kbs": 5.02
+}
+
+--- Latency ---
+{
+  "test": "latency",
+  "samples": 50,
+  "p50_ms": 32.89,
+  "p95_ms": 49.66,
+  "p99_ms": 51.42,
+  "min_ms": 14.64,
+  "max_ms": 51.42
+}
+
+--- Memory ---
+{
+  "test": "memory",
+  "initial_rss_mb": 43.8,
+  "peak_rss_mb": 44.1,
+  "final_rss_mb": 44.1,
+  "samples": 29
+}

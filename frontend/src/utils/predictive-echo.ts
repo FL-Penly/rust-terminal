@@ -13,9 +13,20 @@ export class PredictiveEcho {
   private predicted: string[] = []
   private _enabled = false
   private altScreen = false
+  private readonly decoder = new TextDecoder()
+  private erasureCache = ''
+  private erasureCacheLen = 0
 
   constructor(term: Terminal) {
     this.term = term
+  }
+
+  private getErasure(len: number): string {
+    if (len !== this.erasureCacheLen) {
+      this.erasureCache = '\b \b'.repeat(len)
+      this.erasureCacheLen = len
+    }
+    return this.erasureCache
   }
 
   get enabled(): boolean {
@@ -67,7 +78,7 @@ export class PredictiveEcho {
   handleOutput(data: Uint8Array): void {
     if (!this._enabled || this.predicted.length === 0) return
 
-    const text = new TextDecoder().decode(data)
+    const text = this.decoder.decode(data)
     let matchCount = 0
 
     for (let i = 0; i < text.length && matchCount < this.predicted.length; i++) {
@@ -79,12 +90,10 @@ export class PredictiveEcho {
     }
 
     if (matchCount > 0) {
-      const erasure = '\b \b'.repeat(this.predicted.length)
-      this.term.write(erasure)
+      this.term.write(this.getErasure(this.predicted.length))
       this.predicted.splice(0, matchCount)
     } else if (this.predicted.length > 0) {
-      const erasure = '\b \b'.repeat(this.predicted.length)
-      this.term.write(erasure)
+      this.term.write(this.getErasure(this.predicted.length))
       this.predicted = []
     }
   }
@@ -95,8 +104,7 @@ export class PredictiveEcho {
 
   reset(): void {
     if (this.predicted.length > 0) {
-      const erasure = '\b \b'.repeat(this.predicted.length)
-      this.term.write(erasure)
+      this.term.write(this.getErasure(this.predicted.length))
       this.predicted = []
     }
   }

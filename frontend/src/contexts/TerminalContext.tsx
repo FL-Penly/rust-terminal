@@ -1,5 +1,8 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback, useMemo } from 'react'
 
+const encoder = new TextEncoder()
+const MAX_EARLY_CHUNKS = 200
+
 export interface TerminalContextValue {
   connectionState: 'connecting' | 'connected' | 'disconnected' | 'reconnecting'
   
@@ -106,6 +109,9 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     writeTotalRef.current = 0
     
     if (!hasSubscribersRef.current) {
+      if (earlyOutputRef.current.length >= MAX_EARLY_CHUNKS) {
+        earlyOutputRef.current.shift()
+      }
       earlyOutputRef.current.push(combined)
       return
     }
@@ -186,7 +192,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       
       const { cols, rows } = dimensionsRef.current
       const auth = JSON.stringify({ AuthToken: '', columns: cols, rows: rows })
-      ws.send(new TextEncoder().encode(auth))
+      ws.send(encoder.encode(auth))
 
       if (wasReconnect) {
         isReconnectRef.current = false
@@ -295,7 +301,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           if (timeSinceConnect > 30000) {
             const { cols, rows } = dimensionsRef.current
             const resizeMsg = JSON.stringify({ AuthToken: '', columns: cols, rows: rows })
-            const payload = new TextEncoder().encode(resizeMsg)
+            const payload = encoder.encode(resizeMsg)
             const buf = new Uint8Array(payload.length + 1)
             buf[0] = 0x31
             buf.set(payload, 1)
@@ -333,7 +339,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const sendInput = useCallback((text: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const payload = new TextEncoder().encode(text)
+      const payload = encoder.encode(text)
       const buf = new Uint8Array(payload.length + 1)
       buf[0] = 0x30
       buf.set(payload, 1)
@@ -378,7 +384,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     dimensionsRef.current = { cols, rows }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       const resizeMsg = JSON.stringify({ AuthToken: '', columns: cols, rows: rows })
-      const payload = new TextEncoder().encode(resizeMsg)
+      const payload = encoder.encode(resizeMsg)
       const buf = new Uint8Array(payload.length + 1)
       buf[0] = 0x31
       buf.set(payload, 1)
