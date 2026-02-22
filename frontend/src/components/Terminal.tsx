@@ -3,6 +3,7 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { CanvasAddon } from '@xterm/addon-canvas'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { useTerminal } from '../contexts/TerminalContext'
 import { PredictiveEcho } from '../utils/predictive-echo'
@@ -238,6 +239,7 @@ export const Terminal = () => {
       scrollback: 5000,
       cursorBlink: true,
       allowProposedApi: true,
+      rescaleOverlappingGlyphs: true,
       macOptionClickForcesSelection: true,
     })
     termRef.current = term
@@ -250,6 +252,10 @@ export const Terminal = () => {
     const fitAddon = new FitAddon()
     fitAddonRef.current = fitAddon
     term.loadAddon(fitAddon)
+
+    const unicode11Addon = new Unicode11Addon()
+    term.loadAddon(unicode11Addon)
+    term.unicode.activeVersion = '11'
 
     let renderer: 'webgl' | 'canvas' | 'dom' = 'dom'
     try {
@@ -408,6 +414,26 @@ export const Terminal = () => {
       sendInput(data)
     })
 
+    term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+      if (ev.type === 'keydown' && ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+        ev.preventDefault()
+        sendInput('\x1b[13;2u')
+        return false
+      }
+      return true
+    })
+
+    const kittyQueryDisposable = term.parser.registerCsiHandler({ prefix: '?', final: 'u' }, () => {
+      sendInput('\x1b[?0u')
+      return true
+    })
+    const kittyPushDisposable = term.parser.registerCsiHandler({ prefix: '>', final: 'u' }, () => {
+      return true
+    })
+    const kittyPopDisposable = term.parser.registerCsiHandler({ prefix: '<', final: 'u' }, () => {
+      return true
+    })
+
     const HIGH_WATER = 5
     let pendingWrites = 0
     let paused = false
@@ -547,6 +573,9 @@ export const Terminal = () => {
       oscDisposable.dispose()
       csiDecsetDisposable.dispose()
       csiDecrstDisposable.dispose()
+      kittyQueryDisposable.dispose()
+      kittyPushDisposable.dispose()
+      kittyPopDisposable.dispose()
       window.removeEventListener('predictive-echo-changed', handlePredictiveEchoChanged)
       window.removeEventListener('resize', debouncedResize)
       vv?.removeEventListener('resize', debouncedResize)

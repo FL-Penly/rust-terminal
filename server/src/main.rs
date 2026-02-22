@@ -596,6 +596,8 @@ tty > {} 2>/dev/null
 printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
     tmux set -g window-size latest 2>/dev/null
+    tmux set -g extended-keys always 2>/dev/null
+    tmux bind-key -n S-Enter send-keys -l $'\033[13;2u' 2>/dev/null
     tmux attach
 fi
 ZDOTDIR={} exec {}
@@ -620,6 +622,8 @@ tty > {} 2>/dev/null
 printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
     tmux set -g window-size latest 2>/dev/null
+    tmux set -g extended-keys always 2>/dev/null
+    tmux bind-key -n S-Enter send-keys -l $'\033[13;2u' 2>/dev/null
     tmux attach
 fi
 exec bash --rcfile /tmp/rust_terminal_bashrc
@@ -635,6 +639,8 @@ tty > {} 2>/dev/null
 printf '\033]7337;%s\033\\' "$(tty)" 2>/dev/null
 if tmux has-session 2>/dev/null; then
     tmux set -g window-size latest 2>/dev/null
+    tmux set -g extended-keys always 2>/dev/null
+    tmux bind-key -n S-Enter send-keys -l $'\033[13;2u' 2>/dev/null
     tmux attach
 fi
 exec {}
