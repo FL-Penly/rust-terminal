@@ -14,5 +14,8 @@ frontend/vite.config.d.ts
 .env
 *.log
 
+# QA screenshots
+qa-*.png
+
 # Agent working files
 .sisyphus/
