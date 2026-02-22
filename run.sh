@@ -42,7 +42,9 @@ echo "  Port: $PORT"
 echo ""
 echo "  Access URLs:"
 echo "    http://localhost:$PORT"
-ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' | grep -v '127.0.0.1' | while read ip; do
+{ ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}'; \
+  ip addr 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1; } \
+  | grep -v '127.0.0.1' | sort -u | while read ip; do
     echo "    http://$ip:$PORT"
 done
 echo ""
