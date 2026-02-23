@@ -358,7 +358,8 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                 let after = &text[pos + 6..];
                                 if let Some(end) = after.find('\\') {
                                     let tty = after[..end].trim_end_matches('\x1b');
-                                    if tty.starts_with("/dev/pts/") {
+                                    // Accept both Linux (/dev/pts/N) and macOS (/dev/ttysN) PTY paths
+                                    if tty.starts_with("/dev/") {
                                 if let Ok(mut lock) = client_tty_shared.lock() {
                                     *lock = Some(tty.to_string());
                                 }
@@ -385,8 +386,8 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                                 if let Some(pos) = text.find("]7337;") {
                                                     let after = &text[pos + 6..];
                                                     if let Some(end) = after.find('\\') {
-                                                        let tty = after[..end].trim_end_matches('\x1b');
-                                                        if tty.starts_with("/dev/pts/") {
+                                        let tty = after[..end].trim_end_matches('\x1b');
+                                        if tty.starts_with("/dev/") {
                                 if let Ok(mut lock) = client_tty_shared.lock() {
                                     *lock = Some(tty.to_string());
                                 }
@@ -394,7 +395,7 @@ async fn handle_terminal(socket: WebSocket, state: AppState) {
                                     *lock = Some(tty.to_string());
                                 }
                                 tty_detected = true;
-                                                        }
+                                        }
                                                     }
                                                 }
                                             }
