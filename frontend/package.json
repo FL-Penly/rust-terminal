@@ -17,7 +17,8 @@
     "@xterm/xterm": "^5.5.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "strip-ansi": "^7.1.2"
+    "strip-ansi": "^7.1.2",
+    "xterm-zerolag-input": "^0.1.4"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",
