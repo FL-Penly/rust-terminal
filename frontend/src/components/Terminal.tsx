@@ -7,7 +7,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 
 import '@xterm/xterm/css/xterm.css'
 import { useTerminal } from '../contexts/TerminalContext'
-import { PredictiveEcho } from '../utils/predictive-echo'
+import { ZerolagInputAddon } from 'xterm-zerolag-input'
 
 const MIN_FONT_SIZE = 6
 const MAX_FONT_SIZE = 24
@@ -43,7 +43,8 @@ export const Terminal = () => {
   const resizeTimerRef = useRef<number | null>(null)
   const [showZoom, setShowZoom] = useState(false)
   const zoomTimerRef = useRef<number | null>(null)
-  const predictiveEchoRef = useRef<PredictiveEcho | null>(null)
+  const zerolagRef = useRef<ZerolagInputAddon | null>(null)
+  const zerolagEnabledRef = useRef(localStorage.getItem('terminal_predictive_echo') !== 'off')
   const sendInputRef = useRef(sendInput)
   const mouseStateRef = useRef({ mouseTracking: false, sgrMode: false })
   const selectionPolicyRef = useRef<'local' | 'pty'>('local')
@@ -250,9 +251,11 @@ export const Terminal = () => {
     })
     termRef.current = term
 
-    const predictiveEcho = new PredictiveEcho(term)
-    predictiveEcho.enabled = localStorage.getItem('terminal_predictive_echo') !== 'off'
-    predictiveEchoRef.current = predictiveEcho
+    const zerolag = new ZerolagInputAddon({
+      prompt: { type: 'regex', pattern: /[>$%❯➜]\s*$/, offset: 2 },
+    })
+    term.loadAddon(zerolag)
+    zerolagRef.current = zerolag
 
     // Load FitAddon
     const fitAddon = new FitAddon()
@@ -432,7 +435,7 @@ export const Terminal = () => {
             }
             if (p === 1006) mouseStateRef.current.sgrMode = true
             if (p === 1049 || p === 47) {
-              predictiveEchoRef.current?.setAltScreen(true)
+              zerolagRef.current?.clear()
               xtermTextareaRef.current?.blur()
             }
           }
@@ -454,7 +457,7 @@ export const Terminal = () => {
               }
             }
             if (p === 1006) mouseStateRef.current.sgrMode = false
-            if (p === 1049 || p === 47) predictiveEchoRef.current?.setAltScreen(false)
+            if (p === 1049 || p === 47) zerolagRef.current?.clear()
           }
         }
         return false
@@ -470,8 +473,26 @@ export const Terminal = () => {
 
     // Handle user input -> send to WebSocket
     const dataDisposable = term.onData((data) => {
-      predictiveEcho.handleInput(data)
-      sendInput(data)
+      if (!zerolagEnabledRef.current) {
+        sendInput(data)
+        return
+      }
+      if (data === '\r' || data === '\n') {
+        zerolag.clear()
+        sendInput(data)
+      } else if (data === '\x7f' || data === '\b') {
+        zerolag.removeChar()
+        sendInput(data)
+      } else if (data.length === 1 && data.charCodeAt(0) >= 0x20) {
+        zerolag.addChar(data)
+        sendInput(data)
+      } else {
+        zerolag.clear()
+        sendInput(data)
+      }
+    })
+    const writeParsedDisposable = term.onWriteParsed(() => {
+      if (zerolag.hasPending) zerolag.rerender()
     })
 
     term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
@@ -517,9 +538,6 @@ export const Terminal = () => {
     let paused = false
 
     const unsubscribe = subscribeOutput((data) => {
-      if (data instanceof Uint8Array) {
-        predictiveEcho.handleOutput(data)
-      }
       pendingWrites++
       if (pendingWrites >= HIGH_WATER && !paused) {
         paused = true
@@ -535,7 +553,9 @@ export const Terminal = () => {
     })
 
     const handlePredictiveEchoChanged = (e: Event) => {
-      predictiveEcho.enabled = (e as CustomEvent).detail as boolean
+      const enabled = (e as CustomEvent).detail as boolean
+      zerolagEnabledRef.current = enabled
+      if (!enabled) zerolag.clear()
     }
     window.addEventListener('predictive-echo-changed', handlePredictiveEchoChanged)
 
@@ -649,6 +669,7 @@ export const Terminal = () => {
       if (policyPollId !== null) window.clearInterval(policyPollId)
       unsubscribe()
       dataDisposable.dispose()
+      writeParsedDisposable.dispose()
       oscDisposable.dispose()
       csiDecsetDisposable.dispose()
       csiDecrstDisposable.dispose()
