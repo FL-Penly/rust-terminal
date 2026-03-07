@@ -174,6 +174,7 @@ const btnBase = 'min-h-[36px] flex items-center justify-center rounded-lg shadow
 const Toggle: React.FC<{ expanded: boolean; onClick: () => void }> = ({ expanded, onClick }) => (
   <button
     onClick={onClick}
+    onMouseDown={e => e.preventDefault()}
     className={`min-w-[36px] min-h-[36px] flex items-center justify-center rounded-lg shadow-sm border text-sm active:scale-95 transition-transform duration-100 shrink-0 select-none ${
       expanded
         ? 'bg-accent-blue/20 border-accent-blue text-accent-blue'
@@ -207,6 +208,7 @@ const CmdGroup: React.FC<{ config: CommandConfig | null; onCmd: (cmd: string) =>
 const K: React.FC<{ label: string; onClick: () => void; className?: string; wide?: boolean }> = ({ label, onClick, className = '', wide }) => (
   <button
     onClick={onClick}
+    onMouseDown={e => e.preventDefault()}
     className={`${btnBase} bg-bg-tertiary text-text-primary ${wide ? 'px-4' : 'min-w-[36px] px-2'} ${className}`}
   >
     {label}
@@ -216,6 +218,7 @@ const K: React.FC<{ label: string; onClick: () => void; className?: string; wide
 const Cmd: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick }) => (
   <button
     onClick={onClick}
+    onMouseDown={e => e.preventDefault()}
     className={`${btnBase} bg-bg-tertiary text-accent-blue px-3`}
   >
     {label}
@@ -225,6 +228,7 @@ const Cmd: React.FC<{ label: string; onClick: () => void }> = ({ label, onClick 
 const Sys: React.FC<{ label: string; onClick: () => void; className?: string; 'aria-label'?: string }> = ({ label, onClick, className = '', ...props }) => (
   <button
     onClick={onClick}
+    onMouseDown={e => e.preventDefault()}
     aria-label={props['aria-label']}
     className={`${btnBase} bg-bg-tertiary/50 text-text-secondary min-w-[36px] px-2 ${className}`}
   >
