@@ -193,6 +193,8 @@
   }
   .variable-value {
     min-height: 38px;
+    max-height: 220px;
+    overflow: auto;
     margin: 0;
     padding: 8px 10px;
     border: 1px solid var(--border);
@@ -207,7 +209,6 @@
   .editable-field textarea { padding-right: 66px; }
   .copy-variable-value { min-height: 72px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .large-variable .copy-variable-value { min-height: 220px; }
-  .large-variable .variable-value { max-height: 220px; overflow: auto; }
   .expand-editor {
     position: absolute;
     top: 6px;
@@ -487,6 +488,11 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+function isLargeVariableValue(value) {
+  const text = String(value ?? '');
+  return text.length > 400 || text.split('\n').length > 8;
 }
 
 function currentTemplate() {
@@ -830,7 +836,7 @@ function renderTemplateEditor() {
 
 function renderTemplateView(template) {
   const variables = template.variables.map((variable) => {
-    const largeClass = variable.name.toLocaleUpperCase() === 'TEST_HINTS' ? ' large-variable' : '';
+    const largeClass = isLargeVariableValue(variable.defaultValue) ? ' large-variable' : '';
     return '<div class="variable-readonly' + largeClass + '"><div class="variable-name">' + escapeHtml(variable.name) +
       '</div><pre class="variable-value">' + escapeHtml(variable.defaultValue) + '</pre></div>';
   }).join('');
@@ -998,8 +1004,7 @@ function renderDumpFeedback(copy) {
 
 function renderCopyView(copy) {
   const variables = copy.variables.map((variable, index) => {
-    const isTestHints = variable.name.toLocaleUpperCase() === 'TEST_HINTS';
-    const largeClass = isTestHints ? ' large-variable' : '';
+    const largeClass = isLargeVariableValue(variable.value) ? ' large-variable' : '';
     return '<div class="variable-readonly' + largeClass + '" data-copy-variable-index="' + index + '">' +
       '<div class="variable-name">' + escapeHtml(variable.name) + '</div>' +
       '<div class="editable-field">' +
