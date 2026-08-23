@@ -266,27 +266,6 @@
     transition: .18s ease;
   }
   .toast.show { opacity: 1; transform: translateY(0); }
-  .selection-menu {
-    position: fixed;
-    z-index: 80;
-    display: none;
-    min-width: 178px;
-    padding: 5px;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    background: var(--panel-3);
-    box-shadow: 0 12px 34px rgba(0, 0, 0, .42);
-  }
-  .selection-menu.show { display: block; }
-  .selection-menu button {
-    width: 100%;
-    min-height: 36px;
-    border: 0;
-    background: transparent;
-    text-align: left;
-  }
-  .selection-menu button:hover { background: var(--accent-soft); }
-  .selection-menu-hint { padding: 2px 10px 5px; color: var(--muted); font-size: 10px; }
   .editor-modal {
     position: fixed;
     inset: 0;
@@ -386,7 +365,6 @@
     <main id="detail"></main>
   </div>
   <div id="toast" class="toast"></div>
-  <div id="selection-menu" class="selection-menu" role="menu"></div>
   <div id="editor-modal" class="editor-modal" aria-hidden="true">
     <div class="editor-dialog" role="dialog" aria-modal="true" aria-labelledby="editor-dialog-title">
       <div class="editor-dialog-head">
@@ -399,7 +377,7 @@
 
 <script>
 const WORKSPACE_API = '/api/goal-workspace';
-const DUMP_API = '/api/goal-dump';
+const DUMP_API = '/api/dump-file';
 const VARIABLE_START = '【变量区】';
 const EXECUTION_START = '【执行区】';
 
@@ -952,37 +930,7 @@ function hasSelection(copy, target) {
 
 function updateDumpButton(copy) {
   const button = byId('dump-selection');
-  const bodyTarget = { kind: 'body' };
-  if (button) button.disabled = !hasSelection(copy, bodyTarget) || button.dataset.loading === 'true';
-}
-
-function hideSelectionMenu() {
-  const menu = byId('selection-menu');
-  menu.classList.remove('show');
-  menu.innerHTML = '';
-}
-
-function showSelectionMenu(event, copy, textarea, target) {
-  rememberSelection(textarea, copy, target);
-  if (!hasSelection(copy, target)) return;
-  event.preventDefault();
-  const menu = byId('selection-menu');
-  menu.innerHTML = '<button id="context-dump-selection" role="menuitem">落盘选中内容</button>' +
-    '<div class="selection-menu-hint">Ctrl/Cmd + Alt + S</div>';
-  menu.classList.add('show');
-  menu.style.left = Math.max(8, event.clientX) + 'px';
-  menu.style.top = Math.max(8, event.clientY) + 'px';
-  const bounds = menu.getBoundingClientRect();
-  if (bounds.right > window.innerWidth - 8) {
-    menu.style.left = Math.max(8, window.innerWidth - bounds.width - 8) + 'px';
-  }
-  if (bounds.bottom > window.innerHeight - 8) {
-    menu.style.top = Math.max(8, window.innerHeight - bounds.height - 8) + 'px';
-  }
-  byId('context-dump-selection').addEventListener('click', () => {
-    hideSelectionMenu();
-    dumpSelection(copy, textarea, target);
-  });
+  if (button) button.disabled = !hasSelection(copy) || button.dataset.loading === 'true';
 }
 
 function renderDumpFeedback(copy) {
@@ -1020,9 +968,9 @@ function renderCopyView(copy) {
     '<div class="actions"><button id="dump-selection" disabled>落盘选中</button>' +
     '<button id="copy-goal" class="primary">复制完整 Goal</button><button id="delete-copy" class="danger">删除</button></div></div>' +
     '<div class="card-body"><div id="dump-feedback"></div>' +
-    '<section class="section"><span class="section-label">本次变量值 · 选中文字后右键可落盘（变量定义请在母版维护）</span>' +
+    '<section class="section"><span class="section-label">本次变量值 · 选中文字后点「落盘选中」（变量定义请在母版维护）</span>' +
     '<div class="variable-list">' + (variables || '<div class="notice">此副本没有变量。</div>') + '</div></section>' +
-    '<section class="section"><label class="section-label" for="copy-body">完整 Goal 正文 · 选中文字后右键可落盘</label>' +
+    '<section class="section"><label class="section-label" for="copy-body">完整 Goal 正文 · 选中文字后点「落盘选中」</label>' +
     '<div class="editable-field"><textarea id="copy-body" class="body-editor" placeholder="在这里编辑本次完整 Goal...">' +
     escapeHtml(copy.body) + '</textarea><button id="expand-copy-body" class="expand-editor">打开编辑</button></div>' +
     '</section></div></article>';
@@ -1048,7 +996,6 @@ function renderCopyView(copy) {
     ['select', 'keyup', 'pointerup', 'touchend', 'blur'].forEach((eventName) => {
       textarea.addEventListener(eventName, () => rememberSelection(textarea, copy, target));
     });
-    textarea.addEventListener('contextmenu', (event) => showSelectionMenu(event, copy, textarea, target));
     row.querySelector('[data-expand-variable]').addEventListener('click', () => {
       openExpandedEditor(copy, target, copy.variables[index].name);
     });
@@ -1063,9 +1010,10 @@ function renderCopyView(copy) {
   ['select', 'keyup', 'pointerup', 'touchend', 'blur'].forEach((eventName) => {
     bodyEditor.addEventListener(eventName, () => rememberSelection(bodyEditor, copy, bodyTarget));
   });
-  bodyEditor.addEventListener('contextmenu', (event) => showSelectionMenu(event, copy, bodyEditor, bodyTarget));
-  dumpButton.addEventListener('pointerdown', () => rememberSelection(bodyEditor, copy, bodyTarget));
-  dumpButton.addEventListener('click', () => dumpSelection(copy, bodyEditor, bodyTarget));
+  dumpButton.addEventListener('click', () => {
+    if (savedSelection.copyId !== copy.id || !savedSelection.textarea || !savedSelection.target) return;
+    dumpSelection(copy, savedSelection.textarea, savedSelection.target);
+  });
   byId('expand-copy-body').addEventListener('click', () => openExpandedEditor(copy, bodyTarget, '完整 Goal 正文'));
   byId('copy-goal').addEventListener('click', () => copyCompleteGoal(copy.variables, copy.body));
   byId('delete-copy').addEventListener('click', () => deleteCopy(copy));
@@ -1095,7 +1043,7 @@ function openExpandedEditor(copy, target, label) {
     sourceScrollTop: sourceTextarea.scrollTop,
     sourceScrollLeft: sourceTextarea.scrollLeft,
   };
-  byId('editor-dialog-title').textContent = '编辑 · ' + label + ' · 选中文字后右键可落盘';
+  byId('editor-dialog-title').textContent = '编辑 · ' + label + ' · 选中文字后点「落盘选中」';
   editor.value = editTargetValue(copy, target);
   modal.classList.add('show');
   modal.setAttribute('aria-hidden', 'false');
@@ -1116,7 +1064,6 @@ function openExpandedEditor(copy, target, label) {
   ['select', 'keyup', 'pointerup', 'touchend', 'blur'].forEach((eventName) => {
     editor['on' + eventName] = () => rememberSelection(editor, copy, target);
   });
-  editor.oncontextmenu = (event) => showSelectionMenu(event, copy, editor, target);
 }
 
 function closeExpandedEditor() {
@@ -1198,13 +1145,10 @@ async function dumpSelection(copy, textarea, target) {
   lastDumpMessage = '';
   renderDumpFeedback(copy);
   try {
-    // Goal dump validation reads the persisted workspace. Keep this request
-    // behind all queued saves so a newly-created copy always exists first.
-    await persistNow();
     const response = await fetch(DUMP_API, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workingCopyId: copy.id, text: selectedText }),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: selectedText,
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || typeof payload.path !== 'string') {
@@ -1248,13 +1192,7 @@ async function dumpSelection(copy, textarea, target) {
       window.scrollTo(pageScrollX, pageScrollY);
     });
     renderDumpFeedback(copy);
-    try {
-      await persistNow();
-    } catch (error) {
-      lastDumpError = true;
-      lastDumpMessage = '附件已生成，但副本保存失败；请继续编辑以重试自动保存。';
-      renderDumpFeedback(copy);
-    }
+    scheduleSave();
   } catch (error) {
     console.error('[PromptBoard] Failed to dump selection:', error);
     lastDumpPath = '';
@@ -1298,7 +1236,6 @@ function undoDumpReplacement(copy) {
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
-    hideSelectionMenu();
     closeExpandedEditor();
   }
   if (!event.altKey || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') return;
@@ -1311,13 +1248,6 @@ document.addEventListener('keydown', (event) => {
   event.preventDefault();
   dumpSelection(copy, textarea, target);
 });
-
-document.addEventListener('pointerdown', (event) => {
-  const menu = byId('selection-menu');
-  if (!menu.contains(event.target)) hideSelectionMenu();
-});
-window.addEventListener('blur', hideSelectionMenu);
-window.addEventListener('resize', hideSelectionMenu);
 
 byId('close-expanded-editor').addEventListener('click', closeExpandedEditor);
 byId('editor-modal').addEventListener('pointerdown', (event) => {
