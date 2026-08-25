@@ -364,6 +364,85 @@
   }
   .mode-switch a:hover { color: var(--text); }
   .mode-switch a.active { background: var(--panel-3); color: var(--text); }
+
+  .search-box {
+    position: relative;
+    width: min(360px, 34vw);
+  }
+  .search-input {
+    width: 100%;
+    height: 32px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0 10px;
+    font: inherit;
+  }
+  .search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .search-input::placeholder { color: var(--muted); }
+  .search-results {
+    display: none;
+    position: absolute;
+    top: 38px;
+    left: 0;
+    width: min(520px, 80vw);
+    max-height: 60vh;
+    overflow-y: auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.45);
+    z-index: 50;
+  }
+  .search-results.open { display: block; }
+  .search-hit {
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255,255,255,.05);
+  }
+  .search-hit:last-child { border-bottom: 0; }
+  .search-hit.active { background: var(--panel-3); }
+  .search-hit-title {
+    font-weight: 650;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+  }
+  .search-hit-title .t {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .search-hit-group {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    flex: 0 0 auto;
+  }
+  .search-hit-snippet {
+    color: var(--muted);
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+  .search-hit mark {
+    background: transparent;
+    color: var(--accent);
+    font-weight: 700;
+  }
+  .search-empty {
+    padding: 12px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -372,6 +451,11 @@
       <a href="/prompt-board.html" class="active" aria-current="page">Prompt 库</a>
       <a href="/goal-board.html">Goal 工作台</a>
     </nav>
+    <div class="search-box">
+      <input id="search-input" class="search-input" type="text"
+             placeholder="搜索 prompt（标题/内容，⌘K）" autocomplete="off" spellcheck="false" />
+      <div id="search-results" class="search-results"></div>
+    </div>
     <span class="hint">与 rust-terminal 共享 ~/.vibeterm.json，支持 prompt 分组</span>
     <div class="spacer"></div>
     <span id="status" class="status">加载中...</span>
@@ -1148,6 +1232,198 @@ async function dumpText(text, resultEl) {
     toast('落盘失败');
   }
 }
+
+// ---------- 全局模糊搜索 ----------
+const searchInput = $('search-input');
+const searchResults = $('search-results');
+let searchHits = [];
+let searchActive = -1;
+
+function searchTokens(query) {
+  return query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+// 每个 token 需命中标题或内容（不区分大小写）；标题命中权重更高，标题前缀命中再加分。
+function scorePreset(preset, tokens) {
+  const label = (preset.label || '').toLowerCase();
+  const text = (preset.text || '').toLowerCase();
+  let score = 0;
+  for (const token of tokens) {
+    const inLabel = label.indexOf(token);
+    const inText = text.indexOf(token);
+    if (inLabel === -1 && inText === -1) return -1;
+    if (inLabel !== -1) score += inLabel === 0 ? 5 : 3;
+    if (inText !== -1) score += 1;
+  }
+  return score;
+}
+
+function firstTextHit(text, tokens) {
+  const lower = text.toLowerCase();
+  let best = -1;
+  let bestToken = '';
+  for (const token of tokens) {
+    const idx = lower.indexOf(token);
+    if (idx !== -1 && (best === -1 || idx < best)) {
+      best = idx;
+      bestToken = token;
+    }
+  }
+  return best === -1 ? null : { index: best, token: bestToken };
+}
+
+function highlight(text, tokens) {
+  const frag = document.createDocumentFragment();
+  const lower = text.toLowerCase();
+  let pos = 0;
+  while (pos < text.length) {
+    let hitIdx = -1;
+    let hitLen = 0;
+    for (const token of tokens) {
+      const idx = lower.indexOf(token, pos);
+      if (idx !== -1 && (hitIdx === -1 || idx < hitIdx)) {
+        hitIdx = idx;
+        hitLen = token.length;
+      }
+    }
+    if (hitIdx === -1) {
+      frag.appendChild(document.createTextNode(text.slice(pos)));
+      break;
+    }
+    if (hitIdx > pos) frag.appendChild(document.createTextNode(text.slice(pos, hitIdx)));
+    const mark = document.createElement('mark');
+    mark.textContent = text.slice(hitIdx, hitIdx + hitLen);
+    frag.appendChild(mark);
+    pos = hitIdx + hitLen;
+  }
+  return frag;
+}
+
+function runSearch(query) {
+  const tokens = searchTokens(query);
+  searchHits = [];
+  searchActive = -1;
+  if (tokens.length === 0) {
+    renderSearchResults(false);
+    return;
+  }
+  config.presetGroups.forEach(group => {
+    group.presets.forEach((preset, idx) => {
+      const score = scorePreset(preset, tokens);
+      if (score >= 0) {
+        searchHits.push({ groupId: group.id, groupLabel: group.label, index: idx, preset, score, tokens });
+      }
+    });
+  });
+  searchHits.sort((a, b) => b.score - a.score);
+  searchHits = searchHits.slice(0, 20);
+  searchActive = searchHits.length > 0 ? 0 : -1;
+  renderSearchResults(true);
+}
+
+function renderSearchResults(open) {
+  searchResults.innerHTML = '';
+  searchResults.className = 'search-results' + (open ? ' open' : '');
+  if (!open) return;
+  if (searchHits.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'search-empty';
+    empty.textContent = '没有匹配的 prompt';
+    searchResults.appendChild(empty);
+    return;
+  }
+  searchHits.forEach((hit, i) => {
+    const row = document.createElement('div');
+    row.className = 'search-hit' + (i === searchActive ? ' active' : '');
+
+    const titleLine = document.createElement('div');
+    titleLine.className = 'search-hit-title';
+    const t = document.createElement('span');
+    t.className = 't';
+    t.appendChild(highlight(hit.preset.label || '(未命名)', hit.tokens));
+    const g = document.createElement('span');
+    g.className = 'search-hit-group';
+    g.textContent = hit.groupLabel || '';
+    titleLine.append(t, g);
+    row.appendChild(titleLine);
+
+    const text = (hit.preset.text || '').replace(/\s+/g, ' ').trim();
+    const found = firstTextHit(text, hit.tokens);
+    if (found) {
+      const start = Math.max(0, found.index - 24);
+      const snippet = (start > 0 ? '…' : '') + text.slice(start, found.index + 80);
+      const s = document.createElement('div');
+      s.className = 'search-hit-snippet';
+      s.appendChild(highlight(snippet, hit.tokens));
+      row.appendChild(s);
+    }
+
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      gotoSearchHit(i);
+    });
+    row.addEventListener('mouseenter', () => {
+      searchActive = i;
+      searchResults.querySelectorAll('.search-hit').forEach((el, j) => {
+        el.classList.toggle('active', j === searchActive);
+      });
+    });
+    searchResults.appendChild(row);
+  });
+}
+
+function gotoSearchHit(i) {
+  const hit = searchHits[i];
+  if (!hit) return;
+  selectedGroupId = hit.groupId;
+  config.activePresetGroupId = hit.groupId;
+  selectedPrompt = hit.index;
+  variablePanelOpen = false;
+  closeSearch();
+  render();
+  save();
+  document.querySelector('#prompts .item.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+function closeSearch() {
+  searchInput.value = '';
+  searchHits = [];
+  searchActive = -1;
+  renderSearchResults(false);
+  searchInput.blur();
+}
+
+searchInput.addEventListener('input', () => runSearch(searchInput.value));
+searchInput.addEventListener('focus', () => {
+  if (searchInput.value.trim()) runSearch(searchInput.value);
+});
+searchInput.addEventListener('blur', () => {
+  setTimeout(() => renderSearchResults(false), 100);
+});
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeSearch();
+    return;
+  }
+  if (searchHits.length === 0) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const delta = e.key === 'ArrowDown' ? 1 : -1;
+    searchActive = (searchActive + delta + searchHits.length) % searchHits.length;
+    renderSearchResults(true);
+    searchResults.querySelector('.search-hit.active')?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    gotoSearchHit(searchActive);
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    searchInput.focus();
+    searchInput.select();
+  }
+});
 
 $('reload').addEventListener('click', load);
 $('add-group').addEventListener('click', addGroup);
