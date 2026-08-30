@@ -2826,18 +2826,6 @@ async fn api_herdr_paste(
         );
     }
 
-    let agent = match herdr::request("agent.get", serde_json::json!({ "target": pane_id })).await {
-        Ok(result) => result,
-        Err(error) => return herdr_operation_error("agent_lookup_failed", error),
-    };
-    if !is_interactive_codex_agent(&agent) {
-        return json_error(
-            "agent_input_unavailable",
-            "The target pane is not an interactive Codex input",
-            StatusCode::CONFLICT,
-        );
-    }
-
     let byte_length = body.text.len();
     match herdr::request(
         "pane.send_text",
@@ -2857,21 +2845,6 @@ async fn api_herdr_paste(
         .into_response(),
         Err(error) => herdr_operation_error("paste_failed", error),
     }
-}
-
-fn is_interactive_codex_agent(result: &serde_json::Value) -> bool {
-    let Some(agent) = result.get("agent") else {
-        return false;
-    };
-    let is_codex = agent
-        .get("agent")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("codex"));
-    let is_interactive = agent
-        .get("interactive_ready")
-        .and_then(serde_json::Value::as_bool)
-        != Some(false);
-    is_codex && is_interactive
 }
 
 fn bracketed_paste_text(text: &str) -> String {
@@ -5833,19 +5806,6 @@ mod tests {
             bracketed_paste_text(text),
             "\x1b[200~第一行\r\r```rust\rlet value = \"保持原样\";\r```\r😀\x1b[201~"
         );
-    }
-
-    #[test]
-    fn herdr_paste_accepts_only_interactive_codex_agents() {
-        assert!(is_interactive_codex_agent(&serde_json::json!({
-            "agent": { "agent": "codex", "interactive_ready": true }
-        })));
-        assert!(!is_interactive_codex_agent(&serde_json::json!({
-            "agent": { "agent": "codex", "interactive_ready": false }
-        })));
-        assert!(!is_interactive_codex_agent(&serde_json::json!({
-            "agent": { "agent": "claude", "interactive_ready": true }
-        })));
     }
 
     #[test]

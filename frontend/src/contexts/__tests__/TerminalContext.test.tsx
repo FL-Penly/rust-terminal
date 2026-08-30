@@ -83,7 +83,7 @@ describe('TerminalContext', () => {
     expect(getContext().paneId).toBe('w4:p1')
   })
 
-  it('pastes multiline Herdr text through the acknowledged Codex paste API', async () => {
+  it('pastes multiline Herdr text through the acknowledged pane paste API', async () => {
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
     const text = '第一行\n第二行 😀'
@@ -108,7 +108,7 @@ describe('TerminalContext', () => {
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
-      JSON.stringify({ error: 'agent_input_unavailable', message: 'not a Codex input' }),
+      JSON.stringify({ error: 'paste_failed', message: 'pane input unavailable' }),
       { status: 502, headers: { 'Content-Type': 'application/json' } },
     ))
     render(<TerminalProvider><ContextCapture /></TerminalProvider>)
@@ -116,7 +116,7 @@ describe('TerminalContext', () => {
     await expect(getContext().submitText('first\nsecond')).resolves.toEqual({
       ok: false,
       reason: 'sendFailed',
-      message: 'not a Codex input',
+      message: 'pane input unavailable',
     })
   })
 

@@ -565,7 +565,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
     try {
       // Herdr redraw frames do not replay DEC bracketed-paste mode, so xterm cannot
-      // safely infer it. Ask the server to verify Codex and paste without pressing Enter.
+      // safely infer it. Ask the server to paste into the exact pane without pressing Enter.
       const response = await fetch(
         `/api/herdr/paste?pane=${encodeURIComponent(currentTarget.paneId)}`,
         {
@@ -589,11 +589,11 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         : new TextEncoder().encode(text).byteLength
       return { ok: true, byteLength }
     } catch (err) {
-      console.error('[Terminal] Failed to paste into Herdr Codex:', err)
+      console.error('[Terminal] Failed to paste into Herdr pane:', err)
       return {
         ok: false,
         reason: 'sendFailed',
-        message: '无法将内容粘贴到 Herdr Codex，内容已保留，请重试。',
+        message: '无法将内容粘贴到 Herdr pane，内容已保留，请重试。',
       }
     }
   }, [pasteInput])
