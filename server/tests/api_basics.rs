@@ -35,6 +35,19 @@ async fn cwd_returns_path_and_is_git_flag() {
 }
 
 #[tokio::test]
+async fn herdr_git_context_requires_a_known_pane_and_never_falls_back() {
+    let missing = send_get(test_app(), "/api/diff?mux=herdr").await;
+    assert_status(&missing, StatusCode::BAD_REQUEST);
+    let missing_body = body_json(missing).await;
+    assert_eq!(missing_body["error"], "missing_pane");
+
+    let unknown = send_get(test_app(), "/api/diff?mux=herdr&pane=w9:p9").await;
+    assert_status(&unknown, StatusCode::NOT_FOUND);
+    let unknown_body = body_json(unknown).await;
+    assert_eq!(unknown_body["error"], "herdr_pane_cwd_not_found");
+}
+
+#[tokio::test]
 #[serial]
 async fn user_config_post_then_get_round_trips() {
     let tmp = tempfile::TempDir::new().unwrap();

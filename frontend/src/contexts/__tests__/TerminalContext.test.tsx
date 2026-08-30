@@ -82,17 +82,12 @@ describe('TerminalContext', () => {
     expect(getContext().paneId).toBe('w4:p1')
   })
 
-  it('defers the initial herdr connection until a background page receives focus', () => {
+  it('does not gate a visible herdr page on unreliable document focus', () => {
     vi.mocked(document.hasFocus).mockReturnValue(false)
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
 
     render(<TerminalProvider><ContextCapture /></TerminalProvider>)
-
-    expect(MockWebSocket.instances).toHaveLength(0)
-    expect(getContext().connectionState).toBe('disconnected')
-
-    act(() => window.dispatchEvent(new Event('focus')))
 
     expect(MockWebSocket.instances).toHaveLength(1)
     expect(MockWebSocket.instances[0].url).toMatch(/\/ws\?mux=herdr&pane=w4%3Ap1$/)
@@ -137,8 +132,7 @@ describe('TerminalContext', () => {
     expect(window.location.search).toBe('?mux=herdr&pane=w9%3Ap100')
   })
 
-  it('releases a herdr controller on window blur without reconnecting in the background', () => {
-    vi.useFakeTimers()
+  it('keeps a herdr controller on window blur while the page remains visible', () => {
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
     render(<TerminalProvider><ContextCapture /></TerminalProvider>)
@@ -146,11 +140,9 @@ describe('TerminalContext', () => {
     act(() => ws.open())
 
     act(() => window.dispatchEvent(new Event('blur')))
-    act(() => { vi.runAllTimers() })
-
-    expect(ws.close).toHaveBeenCalledOnce()
+    expect(ws.close).not.toHaveBeenCalled()
     expect(MockWebSocket.instances).toHaveLength(1)
-    expect(getContext().connectionState).toBe('disconnected')
+    expect(getContext().connectionState).toBe('connected')
     expect(getContext().reconnectAttempt).toBe(0)
   })
 
@@ -167,8 +159,10 @@ describe('TerminalContext', () => {
     expect(getContext().connectionState).toBe('connected')
   })
 
-  it('cancels a pending herdr reconnect when focus is lost', () => {
+  it('cancels a pending herdr reconnect when the page becomes hidden', () => {
     vi.useFakeTimers()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('visible')
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
     render(<TerminalProvider><ContextCapture /></TerminalProvider>)
@@ -177,41 +171,49 @@ describe('TerminalContext', () => {
 
     act(() => ws.onclose?.({ reason: '' }))
     expect(getContext().reconnectAttempt).toBe(1)
-    act(() => window.dispatchEvent(new Event('blur')))
+    visibility.mockReturnValue('hidden')
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
     act(() => { vi.runAllTimers() })
 
     expect(MockWebSocket.instances).toHaveLength(1)
     expect(getContext().reconnectAttempt).toBe(0)
   })
 
-  it('reacquires the current herdr pane exactly once when window focus returns', () => {
+  it('reacquires the current herdr pane exactly once when the page becomes visible', () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('visible')
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
     render(<TerminalProvider><ContextCapture /></TerminalProvider>)
 
     act(() => {
-      window.dispatchEvent(new Event('blur'))
-      window.dispatchEvent(new Event('blur'))
+      visibility.mockReturnValue('hidden')
+      document.dispatchEvent(new Event('visibilitychange'))
+      document.dispatchEvent(new Event('visibilitychange'))
     })
     expect(MockWebSocket.instances).toHaveLength(1)
 
     act(() => {
-      window.dispatchEvent(new Event('focus'))
-      window.dispatchEvent(new Event('focus'))
+      visibility.mockReturnValue('visible')
+      document.dispatchEvent(new Event('visibilitychange'))
+      document.dispatchEvent(new Event('visibilitychange'))
     })
 
     expect(MockWebSocket.instances).toHaveLength(2)
     expect(MockWebSocket.instances[1].url).toMatch(/\/ws\?mux=herdr&pane=w4%3Ap1$/)
   })
 
-  it('defers pane changes while unfocused and reacquires only the latest target', () => {
+  it('defers pane changes while hidden and reacquires only the latest target', () => {
     vi.useFakeTimers()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('visible')
     window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
     vi.stubGlobal('WebSocket', MockWebSocket)
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }))
     render(<TerminalProvider><ContextCapture /></TerminalProvider>)
 
-    act(() => window.dispatchEvent(new Event('blur')))
+    visibility.mockReturnValue('hidden')
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
     act(() => {
       getContext().switchTerminal('herdr', 'w4:p2')
       getContext().switchTerminal('herdr', 'w4:p3')
@@ -221,7 +223,8 @@ describe('TerminalContext', () => {
     expect(MockWebSocket.instances).toHaveLength(1)
     expect(getContext().paneId).toBe('w4:p3')
 
-    act(() => window.dispatchEvent(new Event('focus')))
+    visibility.mockReturnValue('visible')
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
 
     expect(MockWebSocket.instances).toHaveLength(2)
     expect(MockWebSocket.instances[1].url).toMatch(/\/ws\?mux=herdr&pane=w4%3Ap3$/)

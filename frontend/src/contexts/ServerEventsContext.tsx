@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useTerminal } from './TerminalContext'
+import { withTerminalTarget } from '../utils/terminal-api'
 
 const POLL_INTERVAL = 5000
 
@@ -268,7 +269,7 @@ export const ServerEventsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     if (mux === 'herdr') {
       try {
         const [diffRes, herdrRes] = await Promise.all([
-          fetch('/api/diff', { signal: AbortSignal.timeout(3000) }),
+          fetch(withTerminalTarget('/api/diff', mux, paneId, clientTtyRef.current), { signal: AbortSignal.timeout(3000) }),
           fetch('/api/herdr/list', { signal: AbortSignal.timeout(3000) }),
         ])
         if (diffRes.ok) {
@@ -287,7 +288,7 @@ export const ServerEventsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     try {
       const ttyParam = clientTtyRef.current ? `?client_tty=${encodeURIComponent(clientTtyRef.current)}` : ''
       const [diffRes, tmuxRes, paneModeRes] = await Promise.all([
-        fetch('/api/diff', { signal: AbortSignal.timeout(3000) }),
+        fetch(withTerminalTarget('/api/diff', mux, paneId, clientTtyRef.current), { signal: AbortSignal.timeout(3000) }),
         fetch(`/api/tmux/list${ttyParam}`, { signal: AbortSignal.timeout(3000) }),
         fetch(`/api/tmux/pane-mode${ttyParam}`, { signal: AbortSignal.timeout(3000) }),
       ])
@@ -303,7 +304,7 @@ export const ServerEventsProvider: React.FC<{ children: React.ReactNode }> = ({ 
       console.error('[ServerEvents] Poll failed:', error)
       setIsOffline(true)
     }
-  }, [applyHerdr, applyTmux, mux])
+  }, [applyHerdr, applyTmux, mux, paneId])
 
   const startPolling = useCallback(() => {
     if (pollIntervalRef.current) return
@@ -321,13 +322,16 @@ export const ServerEventsProvider: React.FC<{ children: React.ReactNode }> = ({ 
   useEffect(() => { clientTtyRef.current = clientTty }, [clientTty])
 
   useEffect(() => {
+    if (mux === 'herdr') {
+      void fetchPollData()
+      return
+    }
     let cancelled = false
     const load = async () => {
       try {
-        const response = await fetch(mux === 'herdr' ? '/api/herdr/list' : '/api/tmux/list', { signal: AbortSignal.timeout(3000) })
+        const response = await fetch('/api/tmux/list', { signal: AbortSignal.timeout(3000) })
         if (response.ok && !cancelled) {
-          if (mux === 'herdr') applyHerdr(await response.json() as RawHerdrPayload)
-          else applyTmux(await response.json())
+          applyTmux(await response.json())
         }
       } catch (error) {
         console.error('[ServerEvents] Initial session load failed:', error)
@@ -335,7 +339,7 @@ export const ServerEventsProvider: React.FC<{ children: React.ReactNode }> = ({ 
     }
     void load()
     return () => { cancelled = true }
-  }, [applyHerdr, applyTmux, mux])
+  }, [applyTmux, fetchPollData, mux])
 
   useEffect(() => {
     if (mux === 'herdr') {

@@ -53,7 +53,7 @@ describe('ServerEventsProvider', () => {
     expect(EventSourceMock.instances[0].url).toContain('client_tty=%2Fdev%2Fttys001')
 
     act(() => { EventSourceMock.instances[0].onerror?.(new Event('error')) })
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/diff', expect.anything()))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/api/diff?client_tty='), expect.anything()))
     await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
     expect(EventSourceMock.instances).toHaveLength(2)
     act(() => { EventSourceMock.instances[1].onopen?.(new Event('open')) })
@@ -86,6 +86,7 @@ describe('ServerEventsProvider', () => {
     await waitFor(() => expect(screen.getByText('loaded:1:online:working')).toBeInTheDocument())
     expect(screen.getByText('loaded:1:online:working')).toHaveAttribute('data-tui-active', 'true')
     expect(EventSourceMock.instances[0].url).toContain('mux=herdr')
+    expect(fetch).toHaveBeenCalledWith('/api/diff?mux=herdr&pane=w4%3Ap1', expect.anything())
     act(() => {
       EventSourceMock.instances[0].onmessage?.(new MessageEvent('message', { data: JSON.stringify({
         herdr: {

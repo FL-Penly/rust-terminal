@@ -100,7 +100,7 @@ const sameTerminalTarget = (left: TerminalTarget, right: TerminalTarget) => (
 )
 
 const pageOwnsHerdrFocus = () => (
-  document.visibilityState === 'visible' && document.hasFocus()
+  document.visibilityState === 'visible'
 )
 
 export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -466,7 +466,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         return
       }
       if (targetRef.current.mux === 'herdr') {
-        if (document.hasFocus()) resumeHerdrOwnership()
+        resumeHerdrOwnership()
         return
       }
 
@@ -496,16 +496,9 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     }
 
-    const handleWindowBlur = () => suspendHerdrOwnership()
-    const handleWindowFocus = () => resumeHerdrOwnership()
-
     document.addEventListener('visibilitychange', handleVisibilityChange)
-    window.addEventListener('blur', handleWindowBlur)
-    window.addEventListener('focus', handleWindowFocus)
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('blur', handleWindowBlur)
-      window.removeEventListener('focus', handleWindowFocus)
     }
   }, [replaceConnection, resumeHerdrOwnership, suspendHerdrOwnership])
 

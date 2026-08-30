@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import { useTerminal } from '../contexts/TerminalContext'
+import { withTerminalTarget } from '../utils/terminal-api'
 
 interface StatusFile {
   file: string
@@ -115,6 +117,11 @@ function buildHunkPatch(filename: string, hunk: DiffHunk, status?: string): stri
 }
 
 export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
+  const { mux, paneId, clientTty } = useTerminal()
+  const gitUrl = useCallback(
+    (url: string) => withTerminalTarget(url, mux, paneId, clientTty),
+    [clientTty, mux, paneId],
+  )
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [log, setLog] = useState<GitLogEntry[]>([])
   const [commitMsg, setCommitMsg] = useState('')
@@ -136,14 +143,14 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
   const [hunkDiscardConfirm, setHunkDiscardConfirm] = useState<{ filename: string; hunk: DiffHunk } | null>(null)
 
   const fetchStatus = useCallback(async () => {
-    const data = await gitFetch<GitStatus>('/api/git/status')
+    const data = await gitFetch<GitStatus>(gitUrl('/api/git/status'))
     if (data) setStatus(data)
-  }, [])
+  }, [gitUrl])
 
   const fetchLog = useCallback(async () => {
-    const data = await gitFetch<GitLogEntry[]>('/api/git/log?count=30')
+    const data = await gitFetch<GitLogEntry[]>(gitUrl('/api/git/log?count=30'))
     if (data) setLog(data)
-  }, [])
+  }, [gitUrl])
 
   useEffect(() => {
     if (!isOpen) return
@@ -203,7 +210,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
     setExpandedFile(key)
     setDiffLoading(true)
     const data = await gitFetch<FileDiff>(
-      `/api/git/file-diff?file=${encodeURIComponent(file)}&staged=${staged}`
+      gitUrl(`/api/git/file-diff?file=${encodeURIComponent(file)}&staged=${staged}`)
     )
     setFileDiff(data)
     setDiffLoading(false)
@@ -217,24 +224,24 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
     setActionInProgress(false)
   }
 
-  const handleStage = (files: string[]) => withAction(() => gitPost('/api/git/stage', { files }).then(() => {}))
-  const handleStageAll = () => withAction(() => gitPost('/api/git/stage', { all: true }).then(() => {}))
-  const handleUnstage = (files: string[]) => withAction(() => gitPost('/api/git/unstage', { files }).then(() => {}))
-  const handleUnstageAll = () => withAction(() => gitPost('/api/git/unstage', { all: true }).then(() => {}))
+  const handleStage = (files: string[]) => withAction(() => gitPost(gitUrl('/api/git/stage'), { files }).then(() => {}))
+  const handleStageAll = () => withAction(() => gitPost(gitUrl('/api/git/stage'), { all: true }).then(() => {}))
+  const handleUnstage = (files: string[]) => withAction(() => gitPost(gitUrl('/api/git/unstage'), { files }).then(() => {}))
+  const handleUnstageAll = () => withAction(() => gitPost(gitUrl('/api/git/unstage'), { all: true }).then(() => {}))
 
   const confirmDiscard = (file: StatusFile) => setDiscardConfirm(file)
   const executeDiscard = () => {
     if (!discardConfirm) return
     const file = discardConfirm.file
     setDiscardConfirm(null)
-    withAction(() => gitPost('/api/git/discard', { files: [file] }).then(() => {}))
+    withAction(() => gitPost(gitUrl('/api/git/discard'), { files: [file] }).then(() => {}))
   }
 
   const handleHunkAction = async (filename: string, hunk: DiffHunk, action: 'stage' | 'unstage' | 'discard', fileStatus?: string) => {
     if (actionInProgress) return
-    const url = action === 'stage' ? '/api/git/stage-hunk'
+    const url = gitUrl(action === 'stage' ? '/api/git/stage-hunk'
       : action === 'unstage' ? '/api/git/stage-hunk'
-      : '/api/git/discard-hunk'
+      : '/api/git/discard-hunk')
 
     const body = action === 'unstage'
       ? { patch: buildHunkPatch(filename, invertHunk(hunk), fileStatus) }
@@ -248,7 +255,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
       const [prefix, file] = [expandedFile[0], expandedFile.substring(2)]
       const staged = prefix === 's'
       const updated = await gitFetch<FileDiff>(
-        `/api/git/file-diff?file=${encodeURIComponent(file)}&staged=${staged}`
+        gitUrl(`/api/git/file-diff?file=${encodeURIComponent(file)}&staged=${staged}`)
       )
       setFileDiff(updated)
     }
@@ -268,9 +275,9 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
 
     setActionInProgress(true)
     if (!hasStaged && hasUnstaged) {
-      await gitPost('/api/git/stage', { all: true })
+      await gitPost(gitUrl('/api/git/stage'), { all: true })
     }
-    const result = await gitPost('/api/git/commit', { message: commitMsg.trim() })
+    const result = await gitPost(gitUrl('/api/git/commit'), { message: commitMsg.trim() })
     if (result?.success) {
       setCommitMsg('')
       await fetchStatus()
@@ -289,7 +296,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
       staged: status.staged.some(s => s.file === f.file),
     }))
 
-    const result = await gitFetch<Record<string, FileDiff>>('/api/git/batch-file-diff', {
+    const result = await gitFetch<Record<string, FileDiff>>(gitUrl('/api/git/batch-file-diff'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ files: batchEntries }),
@@ -303,7 +310,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
     }
     setReviewDiffs(diffs)
     setReviewLoading(false)
-  }, [status])
+  }, [gitUrl, status])
 
   const enterReviewMode = async () => {
     setSelectedCommit(null)
@@ -322,7 +329,7 @@ export const GitPanel: React.FC<GitPanelProps> = ({ isOpen, onClose }) => {
     setReviewLoading(true)
     setReviewMode(true)
     const params = new URLSearchParams({ hash: entry.hash, context: entry.context })
-    const data = await gitFetch<DiffResult>(`/api/git/commit-diff?${params.toString()}`)
+    const data = await gitFetch<DiffResult>(gitUrl(`/api/git/commit-diff?${params.toString()}`))
     if (data) {
       setCommitDiff(data)
       setCollapsedReviewFiles(new Set(data.files.map(file => file.filename)))

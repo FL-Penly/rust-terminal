@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
+import { useTerminal } from '../contexts/TerminalContext'
+import { withTerminalTarget } from '../utils/terminal-api'
 
 interface BranchData {
   local: string[]
@@ -12,6 +14,7 @@ interface BranchSelectorProps {
 }
 
 export const BranchSelector: React.FC<BranchSelectorProps> = React.memo(({ currentBranch, onBranchChange }) => {
+  const { mux, paneId, clientTty } = useTerminal()
   const [isOpen, setIsOpen] = useState(false)
   const [branches, setBranches] = useState<BranchData>({ local: [], remote: [], current: '' })
   const [search, setSearch] = useState('')
@@ -22,7 +25,7 @@ export const BranchSelector: React.FC<BranchSelectorProps> = React.memo(({ curre
    const fetchBranches = useCallback(async () => {
      setIsLoading(true)
      try {
-       const res = await fetch(`/api/git/branches`, { signal: AbortSignal.timeout(5000) })
+       const res = await fetch(withTerminalTarget('/api/git/branches', mux, paneId, clientTty), { signal: AbortSignal.timeout(5000) })
       if (res.ok) {
         const data = await res.json()
         setBranches(data)
@@ -32,7 +35,7 @@ export const BranchSelector: React.FC<BranchSelectorProps> = React.memo(({ curre
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [clientTty, mux, paneId])
 
   useEffect(() => {
     if (isOpen) {
@@ -63,7 +66,7 @@ export const BranchSelector: React.FC<BranchSelectorProps> = React.memo(({ curre
    const handleCheckout = async (branch: string) => {
      setIsOpen(false)
      try {
-       const url = `/api/git/checkout?branch=${encodeURIComponent(branch)}`
+       const url = withTerminalTarget(`/api/git/checkout?branch=${encodeURIComponent(branch)}`, mux, paneId, clientTty)
        const res = await fetch(url, { signal: AbortSignal.timeout(10000) })
       if (res.ok) {
         onBranchChange?.()

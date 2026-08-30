@@ -1413,6 +1413,83 @@ fn get_effective_client_tty(state: &AppState, explicit: Option<String>) -> Optio
     explicit.or_else(|| get_client_tty_from_state(state))
 }
 
+#[derive(Clone, Default, Deserialize)]
+struct TerminalTargetQuery {
+    mux: Option<String>,
+    pane: Option<String>,
+    client_tty: Option<String>,
+}
+
+fn resolve_terminal_cwd(
+    state: &AppState,
+    target: &TerminalTargetQuery,
+) -> Result<String, ApiError> {
+    match target.mux.as_deref() {
+        Some("herdr") => {
+            let pane_id = target
+                .pane
+                .as_deref()
+                .filter(|pane| !pane.trim().is_empty())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "missing_pane".into(),
+                        "pane is required when mux=herdr".into(),
+                    )
+                })?;
+            let snapshot = get_herdr_snapshot(state);
+            snapshot
+                .get("panes")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|panes| {
+                    panes.iter().find(|pane| {
+                        pane.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane_id)
+                    })
+                })
+                .and_then(|pane| {
+                    ["foreground_cwd", "cwd"].iter().find_map(|field| {
+                        pane.get(field)
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|path| !path.trim().is_empty())
+                            .map(str::to_string)
+                    })
+                })
+                .ok_or_else(|| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        "herdr_pane_cwd_not_found".into(),
+                        format!("No working directory available for Herdr pane {}", pane_id),
+                    )
+                })
+        }
+        Some("tmux") | None => Ok(get_cwd(get_effective_client_tty(
+            state,
+            target.client_tty.clone(),
+        ))),
+        Some(other) => Err((
+            StatusCode::BAD_REQUEST,
+            "invalid_mux".into(),
+            format!("Unsupported terminal multiplexer: {}", other),
+        )),
+    }
+}
+
+fn resolve_git_worktree(
+    state: &AppState,
+    target: &TerminalTargetQuery,
+) -> Result<(String, String), ApiError> {
+    let cwd = resolve_terminal_cwd(state, target)?;
+    if !is_git_repo(&cwd) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "not_git_repo".into(),
+            format!("'{}' is not a git repository", cwd),
+        ));
+    }
+    let git_root = get_git_root(&cwd);
+    Ok((cwd, git_root))
+}
+
 fn register_git_context(state: &AppState, git_root: &str) -> String {
     let mut hasher = DefaultHasher::new();
     git_root.hash(&mut hasher);
@@ -1812,50 +1889,42 @@ fn get_files_diff(git_root: &str) -> DiffResult {
 
 // ─── GET /api/diff ─────────────────────────────────────────────────────────
 
-async fn api_diff(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
-    let payload = tokio::task::spawn_blocking(move || {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return serde_json::json!({
-                "error": "not_git_repo",
-                "message": format!("'{}' is not a git repository", cwd),
-                "cwd": cwd,
-            });
-        }
-        let git_root = get_git_root(&cwd);
+async fn api_diff(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
+) -> Response {
+    let outcome = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, ApiError> {
+        let (cwd, git_root) = resolve_git_worktree(&state, &target)?;
         let branch = get_branch(&git_root);
         let diff_data = get_files_diff(&git_root);
-        serde_json::json!({
+        Ok(serde_json::json!({
             "cwd": cwd,
             "git_root": git_root,
             "branch": branch,
             "files": diff_data.files,
             "summary": diff_data.summary,
-        })
+        }))
     })
-    .await
-    .unwrap_or_else(|_| {
-        serde_json::json!({
-            "error": "internal_error",
-            "message": "Task failed",
-        })
-    });
-    Json(payload).into_response()
+    .await;
+    match outcome {
+        Ok(Ok(payload)) => Json(payload).into_response(),
+        Ok(Err((status, code, msg))) => json_error(&code, &msg, status),
+        Err(_) => json_error(
+            "internal_error",
+            "Task failed",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+    }
 }
 
 // ─── GET /api/git/branches ─────────────────────────────────────────────────
 
-async fn api_git_branches(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
+async fn api_git_branches(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
+) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<BranchesResponse, ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         Ok(get_all_branches(&git_root))
     })
     .await;
@@ -1876,6 +1945,8 @@ async fn api_git_branches(axum::extract::State(state): axum::extract::State<AppS
 #[derive(Deserialize)]
 struct CheckoutQuery {
     branch: Option<String>,
+    #[serde(flatten)]
+    target: TerminalTargetQuery,
 }
 
 async fn api_git_checkout(
@@ -1892,19 +1963,12 @@ async fn api_git_checkout(
             )
         }
     };
+    let target = query.target;
 
     let outcome = tokio::task::spawn_blocking({
         let branch = branch.clone();
         move || -> Result<(), ApiError> {
-            let cwd = get_cwd(get_effective_client_tty(&state, None));
-            if !is_git_repo(&cwd) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "not_git_repo".into(),
-                    "Not a git repository".into(),
-                ));
-            }
-            let git_root = get_git_root(&cwd);
+            let (_, git_root) = resolve_git_worktree(&state, &target)?;
             run_cmd_in("git", &["checkout", &branch], &git_root)
                 .map(|_| ())
                 .map_err(|msg| {
@@ -1990,17 +2054,12 @@ fn parse_porcelain_status(output: &str) -> (Vec<StatusFile>, Vec<StatusFile>) {
     (staged, unstaged)
 }
 
-async fn api_git_status(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
+async fn api_git_status(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
+) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<GitStatusResponse, ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         let branch = get_branch(&git_root);
         let output =
             run_cmd_in("git", &["status", "--porcelain=v1"], &git_root).unwrap_or_default();
@@ -2034,18 +2093,11 @@ struct GitFilesRequest {
 
 async fn api_git_stage(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<GitFilesRequest>,
 ) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         let res = if body.all.unwrap_or(false) {
             run_cmd_in("git", &["add", "-A"], &git_root)
         } else if let Some(files) = &body.files {
@@ -2092,18 +2144,11 @@ async fn api_git_stage(
 
 async fn api_git_unstage(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<GitFilesRequest>,
 ) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         let res = if body.all.unwrap_or(false) {
             run_cmd_in("git", &["reset", "HEAD"], &git_root)
         } else if let Some(files) = &body.files {
@@ -2151,18 +2196,11 @@ async fn api_git_unstage(
 
 async fn api_git_discard(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<GitFilesRequest>,
 ) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         let files = match &body.files {
             Some(f) if !f.is_empty() => f,
             _ => {
@@ -2209,6 +2247,7 @@ struct GitCommitRequest {
 
 async fn api_git_commit(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<GitCommitRequest>,
 ) -> Response {
     if body.message.trim().is_empty() {
@@ -2220,15 +2259,7 @@ async fn api_git_commit(
     }
 
     let outcome = tokio::task::spawn_blocking(move || -> Result<String, ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         run_cmd_in("git", &["commit", "-m", &body.message], &git_root).map_err(|msg| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2268,6 +2299,8 @@ struct GitLogEntry {
 #[derive(Deserialize)]
 struct GitLogQuery {
     count: Option<usize>,
+    #[serde(flatten)]
+    target: TerminalTargetQuery,
 }
 
 async fn api_git_log(
@@ -2275,16 +2308,9 @@ async fn api_git_log(
     Query(query): Query<GitLogQuery>,
 ) -> Response {
     let count = query.count.unwrap_or(50).min(200);
+    let target = query.target;
     let outcome = tokio::task::spawn_blocking(move || -> Result<Vec<GitLogEntry>, ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         let context = register_git_context(&state, &git_root);
         let format = "%H\x1f%s\x1f%an\x1f%cr";
         let output = run_cmd_in(
@@ -2334,6 +2360,8 @@ async fn api_git_log(
 struct CommitDiffQuery {
     hash: String,
     context: Option<String>,
+    #[serde(flatten)]
+    target: TerminalTargetQuery,
 }
 
 async fn api_git_commit_diff(
@@ -2358,15 +2386,7 @@ async fn api_git_commit_diff(
                 )
             })?
         } else {
-            let cwd = get_cwd(get_effective_client_tty(&state, None));
-            if !is_git_repo(&cwd) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "not_git_repo".into(),
-                    "Not a git repository".into(),
-                ));
-            }
-            get_git_root(&cwd)
+            resolve_git_worktree(&state, &query.target)?.1
         };
         if !is_git_repo(&git_root) {
             return Err((
@@ -2459,6 +2479,8 @@ async fn api_git_commit_diff(
 struct FileDiffQuery {
     file: String,
     staged: Option<bool>,
+    #[serde(flatten)]
+    target: TerminalTargetQuery,
 }
 
 async fn api_git_file_diff(
@@ -2474,15 +2496,7 @@ async fn api_git_file_diff(
     }
 
     let outcome = tokio::task::spawn_blocking(move || -> Result<DiffResult, ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &query.target)?;
         let file = query.file.clone();
         let is_staged = query.staged.unwrap_or(false);
         if is_staged {
@@ -2549,18 +2563,11 @@ struct BatchFileDiffEntry {
 
 async fn api_git_batch_file_diff(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<BatchFileDiffRequest>,
 ) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
 
         let mut results = serde_json::Map::new();
         for entry in &body.files {
@@ -2631,18 +2638,11 @@ struct HunkPatchRequest {
 
 async fn api_git_stage_hunk(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<HunkPatchRequest>,
 ) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         apply_patch(&git_root, &body.patch, &["apply", "--cached"])
             .map(|_| ())
             .map_err(|msg| {
@@ -2670,18 +2670,11 @@ async fn api_git_stage_hunk(
 
 async fn api_git_discard_hunk(
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(target): Query<TerminalTargetQuery>,
     Json(body): Json<HunkPatchRequest>,
 ) -> Response {
     let outcome = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
-        let cwd = get_cwd(get_effective_client_tty(&state, None));
-        if !is_git_repo(&cwd) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "not_git_repo".into(),
-                "Not a git repository".into(),
-            ));
-        }
-        let git_root = get_git_root(&cwd);
+        let (_, git_root) = resolve_git_worktree(&state, &target)?;
         apply_patch(&git_root, &body.patch, &["apply", "--reverse"])
             .map(|_| ())
             .map_err(|msg| {
@@ -2738,9 +2731,12 @@ fn apply_patch(git_root: &str, patch: &str, args: &[&str]) -> Result<String, Str
 
 // ─── GET /api/herdr/list ──────────────────────────────────────────────────
 
-async fn api_herdr_list() -> Response {
+async fn api_herdr_list(axum::extract::State(state): axum::extract::State<AppState>) -> Response {
     match herdr::list().await {
-        Ok(payload) => Json(payload).into_response(),
+        Ok(payload) => {
+            publish_herdr_snapshot(&state, payload.clone(), None);
+            Json(payload).into_response()
+        }
         Err(error) => {
             tracing::warn!("Failed to list herdr panes: {}", error);
             json_error("herdr_unavailable", &error, StatusCode::SERVICE_UNAVAILABLE)
@@ -5751,5 +5747,42 @@ mod tests {
             herdr_snapshot_status(&snapshot, "w2:p1").as_deref(),
             Some("blocked")
         );
+    }
+
+    #[test]
+    fn herdr_git_context_uses_the_requested_pane_foreground_cwd() {
+        let state = AppState::new("zsh", PathBuf::new());
+        *state.herdr_snapshot.lock().unwrap() = serde_json::json!({
+            "panes": [
+                {
+                    "pane_id": "w1:p1",
+                    "cwd": "/repo/one",
+                    "foreground_cwd": "/repo/one/subdir"
+                },
+                { "pane_id": "w2:p1", "cwd": "/repo/two" }
+            ]
+        });
+
+        let first = resolve_terminal_cwd(
+            &state,
+            &TerminalTargetQuery {
+                mux: Some("herdr".to_string()),
+                pane: Some("w1:p1".to_string()),
+                client_tty: None,
+            },
+        )
+        .unwrap();
+        let second = resolve_terminal_cwd(
+            &state,
+            &TerminalTargetQuery {
+                mux: Some("herdr".to_string()),
+                pane: Some("w2:p1".to_string()),
+                client_tty: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first, "/repo/one/subdir");
+        assert_eq!(second, "/repo/two");
     }
 }
