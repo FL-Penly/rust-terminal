@@ -138,6 +138,30 @@ async fn json_error_envelope_for_invalid_tmux_create() {
 }
 
 #[tokio::test]
+async fn json_error_envelope_for_invalid_herdr_focus() {
+    let resp = send_get(test_app(), "/api/herdr/focus").await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "missing_pane");
+}
+
+#[tokio::test]
+async fn json_error_envelope_for_invalid_herdr_create() {
+    let resp = send_get(test_app(), "/api/herdr/create").await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "missing_name");
+}
+
+#[tokio::test]
+async fn json_error_envelope_for_invalid_herdr_close() {
+    let resp = send_get(test_app(), "/api/herdr/close").await;
+    assert_status(&resp, StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "missing_target");
+}
+
+#[tokio::test]
 async fn json_error_envelope_for_invalid_tmux_kill() {
     let resp = send_get(test_app(), "/api/tmux/kill").await;
     assert_status(&resp, StatusCode::BAD_REQUEST);

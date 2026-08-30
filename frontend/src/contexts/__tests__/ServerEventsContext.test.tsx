@@ -2,7 +2,13 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ServerEventsProvider, useServerEvents } from '../ServerEventsContext'
 
-vi.mock('../TerminalContext', () => ({ useTerminal: () => ({ clientTty: '/dev/ttys001' }) }))
+const terminalState: { clientTty: string | null; mux: 'tmux' | 'herdr'; paneId: string | null } = {
+  clientTty: '/dev/ttys001',
+  mux: 'tmux',
+  paneId: null,
+}
+
+vi.mock('../TerminalContext', () => ({ useTerminal: () => terminalState }))
 
 class EventSourceMock {
   static instances: EventSourceMock[] = []
@@ -14,13 +20,17 @@ class EventSourceMock {
 }
 
 const Probe = () => {
-  const { sessionsLoaded, projectGroups, isOffline } = useServerEvents()
-  return <div>{sessionsLoaded ? 'loaded' : 'loading'}:{projectGroups.length}:{isOffline ? 'offline' : 'online'}</div>
+  const { sessionsLoaded, projectGroups, isOffline, tuiActive } = useServerEvents()
+  const status = projectGroups[0]?.sessions[0]?.agentStatus
+  return <div data-tui-active={tuiActive ? 'true' : 'false'}>{sessionsLoaded ? 'loaded' : 'loading'}:{projectGroups.length}:{isOffline ? 'offline' : 'online'}{status ? `:${status}` : ''}</div>
 }
 
 describe('ServerEventsProvider', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
+    terminalState.clientTty = '/dev/ttys001'
+    terminalState.mux = 'tmux'
+    terminalState.paneId = null
     EventSourceMock.instances = []
     vi.stubGlobal('EventSource', EventSourceMock)
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -48,5 +58,45 @@ describe('ServerEventsProvider', () => {
     expect(EventSourceMock.instances).toHaveLength(2)
     act(() => { EventSourceMock.instances[1].onopen?.(new Event('open')) })
     expect(EventSourceMock.instances[0].close).toHaveBeenCalled()
+  })
+
+  it('applies realtime herdr status and notifies once when work becomes idle', async () => {
+    terminalState.clientTty = null
+    terminalState.mux = 'herdr'
+    terminalState.paneId = 'w4:p1'
+    const notifications: Array<{ title: string; body?: string }> = []
+    class NotificationMock {
+      static permission = 'granted'
+      constructor(title: string, options?: NotificationOptions) {
+        notifications.push({ title, body: options?.body })
+      }
+    }
+    vi.stubGlobal('Notification', NotificationMock)
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith('/api/diff')) return Promise.resolve(new Response(JSON.stringify({ branch: '', cwd: '/tmp' })))
+      return Promise.resolve(new Response(JSON.stringify({
+        panes: [{ pane_id: 'w4:p1', workspace_id: 'w4', cwd: '/tmp', agent_status: 'working' }],
+        workspaces: [{ workspace_id: 'w4', label: 'test' }],
+        agents: [{ pane_id: 'w4:p1', agent: 'claude', agent_status: 'working' }],
+      })))
+    }))
+
+    render(<ServerEventsProvider><Probe /></ServerEventsProvider>)
+    await waitFor(() => expect(screen.getByText('loaded:1:online:working')).toBeInTheDocument())
+    expect(screen.getByText('loaded:1:online:working')).toHaveAttribute('data-tui-active', 'true')
+    expect(EventSourceMock.instances[0].url).toContain('mux=herdr')
+    act(() => {
+      EventSourceMock.instances[0].onmessage?.(new MessageEvent('message', { data: JSON.stringify({
+        herdr: {
+          panes: [{ pane_id: 'w4:p1', workspace_id: 'w4', cwd: '/tmp', agent_status: 'idle' }],
+          workspaces: [{ workspace_id: 'w4', label: 'test' }],
+          agents: [{ pane_id: 'w4:p1', agent: 'claude', agent_status: 'idle' }],
+        },
+      }) }))
+    })
+    await waitFor(() => expect(screen.getByText('loaded:1:online:idle')).toBeInTheDocument())
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(notifications).toEqual([{ title: 'Rust Terminal agent update', body: 'w4:p1 is idle' }])
   })
 })

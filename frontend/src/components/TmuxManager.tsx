@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { useTerminal } from '../contexts/TerminalContext'
+import { useTerminal, type TerminalMux } from '../contexts/TerminalContext'
 
 interface NewSessionModalProps {
   isOpen: boolean
   onClose: () => void
   cwd?: string
   onCreated?: () => void
+  targetMux?: TerminalMux
 }
 
-export const NewSessionModal: React.FC<NewSessionModalProps> = ({ isOpen, onClose, cwd, onCreated }) => {
-  const { sendInput, clientTty } = useTerminal()
+export const NewSessionModal: React.FC<NewSessionModalProps> = ({ isOpen, onClose, cwd, onCreated, targetMux }) => {
+  const { sendInput, clientTty, mux: connectedMux, switchTerminal } = useTerminal()
+  const mux = targetMux ?? connectedMux
   const [sessionName, setSessionName] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -25,20 +27,36 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({ isOpen, onClos
     const name = sessionName.trim()
     if (!name) return
     onClose()
-     try {
-       if (clientTty) {
-         const cwdParam = cwd ? `&cwd=${encodeURIComponent(cwd)}` : ''
-         const url = `/api/tmux/create?name=${encodeURIComponent(name)}&client_tty=${encodeURIComponent(clientTty)}${cwdParam}`
-         const res = await fetch(url, { signal: AbortSignal.timeout(3000) })
+    try {
+      if (mux === 'herdr') {
+        const cwdParam = cwd ? `&cwd=${encodeURIComponent(cwd)}` : ''
+        const response = await fetch(`/api/herdr/create?name=${encodeURIComponent(name)}${cwdParam}`, { signal: AbortSignal.timeout(3000) })
+        if (!response.ok) throw new Error(await response.text())
+        const data = await response.json() as { paneId?: string }
+        if (!data.paneId) throw new Error('Herdr did not return the new pane id')
+        onCreated?.()
+        switchTerminal('herdr', data.paneId)
+        return
+      }
+      if (connectedMux !== 'tmux') throw new Error('Choose a tmux session before creating another one')
+      if (clientTty) {
+        const cwdParam = cwd ? `&cwd=${encodeURIComponent(cwd)}` : ''
+        const url = `/api/tmux/create?name=${encodeURIComponent(name)}&client_tty=${encodeURIComponent(clientTty)}${cwdParam}`
+        const res = await fetch(url, { signal: AbortSignal.timeout(3000) })
         if (res.ok) {
           sessionStorage.setItem('ttyd_last_tmux_session', name)
           onCreated?.()
           return
         }
       }
-    } catch {}
-    sendInput(` tmux new-session -d -s ${name} 2>/dev/null; tmux attach -t ${name}\r`)
-    sessionStorage.setItem('ttyd_last_tmux_session', name)
+    } catch (error) {
+      console.error('[TmuxManager] Create failed:', error)
+      if (mux === 'herdr') return
+    }
+    if (mux === 'tmux') {
+      sendInput(` tmux new-session -d -s ${name} 2>/dev/null; tmux attach -t ${name}\r`)
+      sessionStorage.setItem('ttyd_last_tmux_session', name)
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -58,7 +76,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({ isOpen, onClos
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="w-full max-w-sm bg-bg-secondary rounded-xl p-4">
-        <h3 className="text-lg font-semibold mb-4">New Tmux Session</h3>
+        <h3 className="text-lg font-semibold mb-4">{mux === 'herdr' ? 'New Herdr Workspace' : 'New Tmux Session'}</h3>
         
         <input
           ref={inputRef}
@@ -66,7 +84,7 @@ export const NewSessionModal: React.FC<NewSessionModalProps> = ({ isOpen, onClos
           value={sessionName}
           onChange={(e) => setSessionName(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Session name (e.g. work, claude)"
+          placeholder={mux === 'herdr' ? 'Workspace name (e.g. work, claude)' : 'Session name (e.g. work, claude)'}
           className="w-full px-3 py-2 bg-bg-tertiary border border-border-subtle rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-purple mb-4"
         />
         

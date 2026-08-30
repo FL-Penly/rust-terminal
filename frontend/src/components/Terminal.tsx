@@ -22,7 +22,7 @@ export const Terminal = () => {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const { subscribeOutput, sendInput, registerPasteHandler, sendControl, resize, setClientTty } = useTerminal()
+  const { subscribeOutput, sendInput, registerPasteHandler, sendControl, resize, setClientTty, mux, paneId } = useTerminal()
   const { tuiActive } = useServerEvents()
   const setClientTtyRef = useRef(setClientTty)
   
@@ -41,6 +41,8 @@ export const Terminal = () => {
   const sendInputRef = useRef(sendInput)
   const pasteResultCaptureRef = useRef<PasteResultCapture['current']>(null)
   const mouseStateRef = useRef({ mouseTracking: false, sgrMode: false })
+  const muxRef = useRef(mux)
+  const wheelAccumRef = useRef(0)
   const selectionPolicyRef = useRef<'local' | 'pty'>('local')
   const clientTtyValueRef = useRef<string | null>(null)
   const [copyModeData, setCopyModeData] = useState<{ lines: string[]; viewportLine: number } | null>(null)
@@ -52,7 +54,23 @@ export const Terminal = () => {
   const lastTapTimeRef = useRef(0)
 
   useEffect(() => { sendInputRef.current = sendInput }, [sendInput])
+  useEffect(() => { muxRef.current = mux }, [mux])
   useEffect(() => { selectionPolicyRef.current = tuiActive ? 'pty' : 'local' }, [tuiActive])
+
+  const sendTerminalWheel = useCallback((direction: 'up' | 'down', clientX: number, clientY: number) => {
+    const term = termRef.current
+    const screen = xtermScreenRef.current
+    if (!term || !screen) return
+    const rect = screen.getBoundingClientRect()
+    const col = Math.max(1, Math.min(term.cols, Math.floor((clientX - rect.left) / (rect.width / term.cols)) + 1))
+    const row = Math.max(1, Math.min(term.rows, Math.floor((clientY - rect.top) / (rect.height / term.rows)) + 1))
+    const button = direction === 'down' ? 65 : 64
+    if (muxRef.current === 'herdr' || mouseStateRef.current.sgrMode) {
+      sendInputRef.current(`\x1b[<${button};${col};${row}M`)
+    } else {
+      sendInputRef.current(`\x1b[M${String.fromCharCode(button + 32)}${String.fromCharCode(col + 32)}${String.fromCharCode(row + 32)}`)
+    }
+  }, [])
 
   const handleResize = useCallback(() => {
     if (fitAddonRef.current && termRef.current) {
@@ -138,8 +156,9 @@ export const Terminal = () => {
       const isAltBuffer = term.buffer.active.type === 'alternate'
       const ms = mouseStateRef.current
 
-      // Only intercept touch for alt-buffer mouse-tracking (tmux scroll)
-      if (isAltBuffer && ms.mouseTracking) {
+      // Forward TUI scrolling explicitly. Herdr full frames omit DEC mouse-mode setup,
+      // so xterm cannot infer wheel reporting from the frame by itself.
+      if ((isAltBuffer && ms.mouseTracking) || (muxRef.current === 'herdr' && selectionPolicyRef.current === 'pty')) {
         const y = e.touches[0].clientY
         const delta = t.lastY - y
         t.lastY = y
@@ -156,22 +175,13 @@ export const Terminal = () => {
           const dir = t.accumDelta > 0 ? 1 : -1
           t.accumDelta -= dir * stepPx
 
-          const cellWidth = rect.width / term.cols
-          const col = Math.max(1, Math.min(term.cols, Math.floor((e.touches[0].clientX - rect.left) / cellWidth) + 1))
-          const row = Math.max(1, Math.min(term.rows, Math.floor((e.touches[0].clientY - rect.top) / cellHeight) + 1))
-          const btn = dir > 0 ? 65 : 64
-
-          if (ms.sgrMode) {
-            sendInputRef.current(`\x1b[<${btn};${col};${row}M`)
-          } else {
-            sendInputRef.current(`\x1b[M${String.fromCharCode(btn + 32)}${String.fromCharCode(col + 32)}${String.fromCharCode(row + 32)}`)
-          }
+          sendTerminalWheel(dir > 0 ? 'down' : 'up', e.touches[0].clientX, e.touches[0].clientY)
         }
         e.preventDefault()
       }
-      // For normal buffer: do nothing — let xterm.js handle scroll + selection natively
+      // Shell panes still use xterm's native scrollback and selection.
     }
-  }, [updateFontSize])
+  }, [sendTerminalWheel, updateFontSize])
 
   const handleTouchEnd = useCallback((e: TouchEvent) => {
     const prevMode = touchRef.current.mode
@@ -546,6 +556,25 @@ export const Terminal = () => {
     container.addEventListener('touchmove', handleTouchMove, { passive: false })
     container.addEventListener('touchend', handleTouchEnd, { passive: true })
 
+    const handleWheel = (event: WheelEvent) => {
+      if (muxRef.current !== 'herdr' || selectionPolicyRef.current !== 'pty' || !xtermScreen) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      const rect = xtermScreen.getBoundingClientRect()
+      const cellHeight = rect.height / Math.max(1, term.rows)
+      const normalizedDelta = event.deltaY * (event.deltaMode === 1 ? cellHeight : event.deltaMode === 2 ? rect.height : 1)
+      wheelAccumRef.current += normalizedDelta
+      const step = Math.max(8, cellHeight * 0.8)
+      let emitted = 0
+      while (Math.abs(wheelAccumRef.current) >= step && emitted < 8) {
+        const direction = wheelAccumRef.current > 0 ? 'down' : 'up'
+        wheelAccumRef.current += direction === 'down' ? -step : step
+        sendTerminalWheel(direction, event.clientX, event.clientY)
+        emitted += 1
+      }
+    }
+    container.addEventListener('wheel', handleWheel, { passive: false, capture: true })
+
     const handlePaste = async (e: ClipboardEvent) => {
       const items = e.clipboardData?.items
       if (!items) return
@@ -639,10 +668,11 @@ export const Terminal = () => {
       container.removeEventListener('touchstart', handleTouchStart)
       container.removeEventListener('touchmove', handleTouchMove)
       container.removeEventListener('touchend', handleTouchEnd)
+      container.removeEventListener('wheel', handleWheel, { capture: true })
       container.removeEventListener('paste', handlePaste, true)
       term.dispose()
     }
-  }, [subscribeOutput, sendInput, registerPasteHandler, sendControl, resize, handleResize, debouncedResize, handleTouchStart, handleTouchMove, handleTouchEnd])
+  }, [subscribeOutput, sendInput, registerPasteHandler, sendControl, resize, handleResize, debouncedResize, handleTouchStart, handleTouchMove, handleTouchEnd, sendTerminalWheel])
 
   const zoomPercent = Math.round((fontSize / DEFAULT_FONT_SIZE) * 100)
 
@@ -665,7 +695,10 @@ export const Terminal = () => {
           onClose={() => setCopyModeData(null)}
           onFetchMore={async (page: number) => {
             try {
-              const res = await fetch(`/api/tmux/page-up?page=${page}`, { signal: AbortSignal.timeout(3000) })
+              const url = mux === 'herdr'
+                ? `/api/herdr/page-up?pane=${encodeURIComponent(paneId ?? '')}&page=${page}`
+                : `/api/tmux/page-up?page=${page}`
+              const res = await fetch(url, { signal: AbortSignal.timeout(3000) })
               if (!res.ok) return null
               const data = await res.json() as { lines: string[] }
               return data.lines.length > 0 ? data.lines : null

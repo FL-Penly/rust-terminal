@@ -68,7 +68,7 @@ else
   ok "server reachable"
 
   for path in /api/health /api/cwd /api/client-tty /api/tmux/list /api/git/status; do
-    code=$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 "${HOST}${path}" 2>/dev/null || echo "ERR")
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${HOST}${path}" 2>/dev/null || echo "ERR")
     if [[ "$code" == "200" || "$code" == "400" ]]; then
       ok "GET ${path} → ${code}"
     else

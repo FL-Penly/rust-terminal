@@ -11,6 +11,8 @@ export type InputSendResult =
 
 export type PasteInputHandler = (text: string) => InputSendResult
 
+export type TerminalMux = 'tmux' | 'herdr'
+
 export interface TerminalContextValue {
   connectionState: 'connecting' | 'connected' | 'disconnected' | 'reconnecting'
   
@@ -36,6 +38,16 @@ export interface TerminalContextValue {
 
   clientTty: string | null
   setClientTty: (tty: string) => void
+
+  mux: TerminalMux
+
+  paneId: string | null
+
+  switchTerminal: (mux: TerminalMux, paneId?: string) => void
+
+  disconnectReason: string | null
+
+  takeoverDetected: boolean
 }
 
 const TerminalContext = createContext<TerminalContextValue | null>(null)
@@ -68,8 +80,32 @@ const MAX_RECONNECT_ATTEMPTS = 10
 const RECONNECT_DELAYS = [500, 1000, 2000, 3000, 5000, 5000, 10000, 10000, 15000, 30000]
 
 const TMUX_SESSION_KEY = 'ttyd_last_tmux_session'
+const TARGET_SWITCH_DELAY = 70
+
+interface TerminalTarget {
+  mux: TerminalMux
+  paneId: string | null
+}
+
+const readTerminalTarget = (): TerminalTarget => {
+  const params = new URLSearchParams(window.location.search)
+  const paneId = params.get('pane')
+  return params.get('mux') === 'herdr' && paneId
+    ? { mux: 'herdr', paneId }
+    : { mux: 'tmux', paneId: null }
+}
+
+const sameTerminalTarget = (left: TerminalTarget, right: TerminalTarget) => (
+  left.mux === right.mux && left.paneId === right.paneId
+)
+
+const pageOwnsHerdrFocus = () => (
+  document.visibilityState === 'visible' && document.hasFocus()
+)
 
 export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [target, setTarget] = useState<TerminalTarget>(readTerminalTarget)
+  const targetRef = useRef<TerminalTarget>(target)
   const terminalRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const pasteHandlerRef = useRef<PasteInputHandler | null>(null)
@@ -77,10 +113,15 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected' | 'reconnecting'>('connecting')
   const [reconnectAttempt, setReconnectAttempt] = useState(0)
   const reconnectTimerRef = useRef<number | null>(null)
-  const manualDisconnectRef = useRef(false)
-  const isReconnectRef = useRef(false)
+  const targetSwitchTimerRef = useRef<number | null>(null)
+  const pendingTargetRef = useRef<TerminalTarget | null>(null)
+  const connectionGenerationRef = useRef(0)
+  const herdrOwnershipSuspendedRef = useRef(!pageOwnsHerdrFocus())
+  const focusAbortRef = useRef<AbortController | null>(null)
   const lastConnectedTimeRef = useRef<number>(0)
   const [clientTty, setClientTty] = useState<string | null>(null)
+  const [disconnectReason, setDisconnectReason] = useState<string | null>(null)
+  const [takeoverDetected, setTakeoverDetected] = useState(false)
   const clientTtyRef = useRef<string | null>(null)
   
   const dimensionsRef = useRef({ cols: 80, rows: 24 })
@@ -172,25 +213,38 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [waitForClientTty])
 
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return
-    
-    const wasReconnect = isReconnectRef.current
-    setConnectionState(wasReconnect ? 'reconnecting' : 'connecting')
-    
+  const connectRef = useRef<(nextTarget: TerminalTarget, generation: number, reconnecting: boolean) => void>(() => undefined)
+
+  const connect = useCallback((nextTarget: TerminalTarget, generation: number, reconnecting: boolean) => {
+    if (generation !== connectionGenerationRef.current) return
+    if (nextTarget.mux === 'herdr' && herdrOwnershipSuspendedRef.current) {
+      setConnectionState('disconnected')
+      return
+    }
+    const existing = wsRef.current
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return
+
+    setConnectionState(reconnecting ? 'reconnecting' : 'connecting')
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
     const path = window.location.pathname.replace(/\/$/, '')
-    const wsUrl = `${protocol}//${host}${path}/ws`
+    const wsParams = nextTarget.mux === 'herdr'
+      ? `?mux=herdr&pane=${encodeURIComponent(nextTarget.paneId ?? '')}`
+      : ''
+    const wsUrl = `${protocol}//${host}${path}/ws${wsParams}`
 
     const ws = new WebSocket(wsUrl, ['tty'])
     ws.binaryType = 'arraybuffer'
     wsRef.current = ws
 
     ws.onopen = () => {
+      if (generation !== connectionGenerationRef.current || wsRef.current !== ws) return
       console.log('[Terminal] WebSocket connected')
       setConnectionState('connected')
       setReconnectAttempt(0)
+      setDisconnectReason(null)
+      setTakeoverDetected(false)
       lastConnectedTimeRef.current = Date.now()
       clientTtyRef.current = null
       setClientTty(null)
@@ -199,13 +253,13 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const auth = JSON.stringify({ AuthToken: '', columns: cols, rows: rows })
       ws.send(encoder.encode(auth))
 
-      if (wasReconnect) {
-        isReconnectRef.current = false
+      if (nextTarget.mux === 'tmux') {
+        restoreTmuxSession(ws)
       }
-      restoreTmuxSession(ws)
     }
 
     ws.onmessage = (event) => {
+      if (generation !== connectionGenerationRef.current || wsRef.current !== ws) return
       const data = new Uint8Array(event.data as ArrayBuffer)
       if (data.length === 0) return
 
@@ -238,8 +292,9 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     }
 
-    ws.onclose = () => {
-      console.log('[Terminal] WebSocket closed')
+    ws.onclose = (event) => {
+      if (generation !== connectionGenerationRef.current || wsRef.current !== ws) return
+      console.log('[Terminal] WebSocket closed', event.reason)
       wsRef.current = null
       
       flushBuffer()
@@ -248,22 +303,30 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         rafIdRef.current = null
       }
       
-      if (manualDisconnectRef.current) {
-        manualDisconnectRef.current = false
-        setConnectionState('disconnected')
-        return
-      }
+      const wasTakenOver = nextTarget.mux === 'herdr' && event.reason.toLocaleLowerCase().includes('taken over')
+      setDisconnectReason(event.reason || (nextTarget.mux === 'herdr' ? 'Herdr terminal connection closed' : 'Connection lost'))
+      setTakeoverDetected(wasTakenOver)
       
       setConnectionState('disconnected')
-      isReconnectRef.current = true
-      
+      if (wasTakenOver) {
+        setReconnectAttempt(0)
+        return
+      }
+      if (nextTarget.mux === 'herdr' && herdrOwnershipSuspendedRef.current) {
+        setReconnectAttempt(0)
+        return
+      }
+
       setReconnectAttempt(prev => {
         const attempt = prev + 1
         if (attempt <= MAX_RECONNECT_ATTEMPTS) {
           const delay = RECONNECT_DELAYS[prev] || 30000
           console.log(`[Terminal] Reconnecting in ${delay}ms (attempt ${attempt})`)
           reconnectTimerRef.current = window.setTimeout(() => {
-            connect()
+            const ownershipSuspended = nextTarget.mux === 'herdr' && herdrOwnershipSuspendedRef.current
+            if (generation === connectionGenerationRef.current && !ownershipSuspended) {
+              connectRef.current(nextTarget, generation, true)
+            }
           }, delay)
         }
         return attempt
@@ -271,80 +334,209 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
 
     ws.onerror = (error) => {
+      if (generation !== connectionGenerationRef.current || wsRef.current !== ws) return
       console.error('[Terminal] WebSocket error', error)
+      if (nextTarget.mux === 'herdr') setDisconnectReason('Unable to reach the Herdr terminal controller')
     }
   }, [restoreTmuxSession, flushBuffer])
 
-  const reconnect = useCallback(() => {
+  connectRef.current = connect
+
+  const retireConnection = useCallback((clearScreen: boolean) => {
+    const generation = connectionGenerationRef.current + 1
+    connectionGenerationRef.current = generation
     if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current)
+      window.clearTimeout(reconnectTimerRef.current)
       reconnectTimerRef.current = null
     }
-    isReconnectRef.current = true
+    const previous = wsRef.current
+    wsRef.current = null
+    if (previous) {
+      previous.onopen = null
+      previous.onmessage = null
+      previous.onclose = null
+      previous.onerror = null
+      previous.close()
+    }
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
+    writeBufferRef.current = []
+    writeTotalRef.current = 0
+    earlyOutputRef.current = []
+    if (clearScreen) listenersRef.current.forEach(listener => listener('\x1bc'))
+    clientTtyRef.current = null
+    setClientTty(null)
+    return generation
+  }, [])
+
+  const replaceConnection = useCallback((nextTarget: TerminalTarget, reconnecting: boolean) => {
+    const generation = retireConnection(!reconnecting)
+    setDisconnectReason(null)
+    setTakeoverDetected(false)
     setReconnectAttempt(0)
-    connect()
-  }, [connect])
+    if (nextTarget.mux === 'herdr' && herdrOwnershipSuspendedRef.current) {
+      setConnectionState('disconnected')
+      return
+    }
+    connectRef.current(nextTarget, generation, reconnecting)
+  }, [retireConnection])
+
+  const suspendHerdrOwnership = useCallback(() => {
+    const alreadySuspended = herdrOwnershipSuspendedRef.current
+    herdrOwnershipSuspendedRef.current = true
+    if (targetRef.current.mux !== 'herdr') return
+
+    const previous = wsRef.current
+    if (alreadySuspended && !previous && reconnectTimerRef.current === null) return
+
+    retireConnection(false)
+    setConnectionState('disconnected')
+    setReconnectAttempt(0)
+    setDisconnectReason(null)
+    setTakeoverDetected(false)
+  }, [retireConnection])
+
+  const resumeHerdrOwnership = useCallback(() => {
+    if (document.visibilityState !== 'visible') return
+    herdrOwnershipSuspendedRef.current = false
+    if (targetRef.current.mux !== 'herdr') return
+
+    const ws = wsRef.current
+    const isActive = ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+    if (!isActive) replaceConnection(targetRef.current, true)
+  }, [replaceConnection])
+
+  const switchTerminal = useCallback((mux: TerminalMux, paneId?: string) => {
+    const nextTarget: TerminalTarget = mux === 'herdr' && paneId
+      ? { mux: 'herdr', paneId }
+      : { mux: 'tmux', paneId: null }
+    if (targetSwitchTimerRef.current) {
+      window.clearTimeout(targetSwitchTimerRef.current)
+      targetSwitchTimerRef.current = null
+    }
+    pendingTargetRef.current = nextTarget
+    if (sameTerminalTarget(targetRef.current, nextTarget)) {
+      pendingTargetRef.current = null
+      return
+    }
+    targetSwitchTimerRef.current = window.setTimeout(() => {
+      const pendingTarget = pendingTargetRef.current
+      if (!pendingTarget || !sameTerminalTarget(pendingTarget, nextTarget)) return
+      pendingTargetRef.current = null
+      targetSwitchTimerRef.current = null
+      targetRef.current = nextTarget
+      setTarget(nextTarget)
+
+      const url = new URL(window.location.href)
+      url.searchParams.delete('mux')
+      url.searchParams.delete('pane')
+      if (nextTarget.mux === 'herdr') {
+        url.searchParams.set('mux', 'herdr')
+        url.searchParams.set('pane', nextTarget.paneId ?? '')
+      }
+      window.history.replaceState(window.history.state, '', url)
+
+      focusAbortRef.current?.abort()
+      if (nextTarget.mux === 'herdr' && nextTarget.paneId) {
+        const controller = new AbortController()
+        focusAbortRef.current = controller
+        void fetch(`/api/herdr/focus?pane=${encodeURIComponent(nextTarget.paneId)}`, { signal: controller.signal })
+          .then(response => {
+            if (!response.ok) console.warn('[Terminal] Herdr focus failed; terminal connection will continue')
+          })
+          .catch(error => {
+            if (error instanceof DOMException && error.name === 'AbortError') return
+            console.warn('[Terminal] Herdr focus failed; terminal connection will continue', error)
+          })
+      }
+      replaceConnection(nextTarget, false)
+    }, TARGET_SWITCH_DELAY)
+  }, [replaceConnection])
+
+  const reconnect = useCallback(() => {
+    replaceConnection(targetRef.current, true)
+  }, [replaceConnection])
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        const ws = wsRef.current
-        const isDisconnected = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING
+      if (document.visibilityState !== 'visible') {
+        suspendHerdrOwnership()
+        return
+      }
+      if (targetRef.current.mux === 'herdr') {
+        if (document.hasFocus()) resumeHerdrOwnership()
+        return
+      }
 
-        if (isDisconnected) {
-          console.log('[Terminal] Page became visible, connection lost — reconnecting immediately')
-          if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current)
-            reconnectTimerRef.current = null
-          }
-          isReconnectRef.current = true
-          setReconnectAttempt(0)
-          connect()
-        } else if (ws && ws.readyState === WebSocket.OPEN) {
-          // Mobile browsers may freeze WebSocket without firing onclose; probe with a resize msg
-          const timeSinceConnect = Date.now() - lastConnectedTimeRef.current
-          if (timeSinceConnect > 30000) {
-            const { cols, rows } = dimensionsRef.current
-            const resizeMsg = JSON.stringify({ AuthToken: '', columns: cols, rows: rows })
-            const payload = encoder.encode(resizeMsg)
-            const buf = new Uint8Array(payload.length + 1)
-            buf[0] = 0x31
-            buf.set(payload, 1)
-            try {
-              ws.send(buf)
-            } catch {
-              console.log('[Terminal] Connection stale on visibility change — forcing reconnect')
-              ws.close()
-            }
+      const ws = wsRef.current
+      const isDisconnected = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING
+
+      if (isDisconnected) {
+        console.log('[Terminal] Page became visible, connection lost — reconnecting immediately')
+        replaceConnection(targetRef.current, true)
+      } else if (ws.readyState === WebSocket.OPEN) {
+        // Mobile browsers may freeze WebSocket without firing onclose; probe with a resize msg
+        const timeSinceConnect = Date.now() - lastConnectedTimeRef.current
+        if (timeSinceConnect > 30000) {
+          const { cols, rows } = dimensionsRef.current
+          const resizeMsg = JSON.stringify({ AuthToken: '', columns: cols, rows: rows })
+          const payload = encoder.encode(resizeMsg)
+          const buf = new Uint8Array(payload.length + 1)
+          buf[0] = 0x31
+          buf.set(payload, 1)
+          try {
+            ws.send(buf)
+          } catch {
+            console.log('[Terminal] Connection stale on visibility change — forcing reconnect')
+            ws.close()
           }
         }
       }
     }
 
+    const handleWindowBlur = () => suspendHerdrOwnership()
+    const handleWindowFocus = () => resumeHerdrOwnership()
+
     document.addEventListener('visibilitychange', handleVisibilityChange)
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
-  }, [connect])
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('focus', handleWindowFocus)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('blur', handleWindowBlur)
+      window.removeEventListener('focus', handleWindowFocus)
+    }
+  }, [replaceConnection, resumeHerdrOwnership, suspendHerdrOwnership])
 
   useEffect(() => {
-    connect()
+    replaceConnection(targetRef.current, false)
     return () => {
-      manualDisconnectRef.current = true
+      connectionGenerationRef.current += 1
       if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current)
+        window.clearTimeout(reconnectTimerRef.current)
       }
+      if (targetSwitchTimerRef.current) {
+        window.clearTimeout(targetSwitchTimerRef.current)
+      }
+      focusAbortRef.current?.abort()
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = null
       }
       if (wsRef.current) {
+        wsRef.current.onopen = null
+        wsRef.current.onmessage = null
+        wsRef.current.onclose = null
+        wsRef.current.onerror = null
         wsRef.current.close()
       }
     }
-  }, [connect])
+  }, [replaceConnection])
 
   const sendInput = useCallback((text: string): InputSendResult => {
     const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (pendingTargetRef.current || !ws || ws.readyState !== WebSocket.OPEN) {
       return { ok: false, reason: 'disconnected' }
     }
 
@@ -433,7 +625,12 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     reconnectAttempt,
     clientTty,
     setClientTty: setClientTtyValue,
-  }), [connectionState, sendInput, pasteInput, registerPasteHandler, sendKey, subscribeOutput, sendControl, terminalRef, resize, reconnect, reconnectAttempt, clientTty, setClientTtyValue])
+    mux: target.mux,
+    paneId: target.paneId,
+    switchTerminal,
+    disconnectReason,
+    takeoverDetected,
+  }), [connectionState, sendInput, pasteInput, registerPasteHandler, sendKey, subscribeOutput, sendControl, terminalRef, resize, reconnect, reconnectAttempt, clientTty, setClientTtyValue, target, switchTerminal, disconnectReason, takeoverDetected])
 
   return (
     <TerminalContext.Provider value={contextValue}>

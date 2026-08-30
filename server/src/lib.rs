@@ -1,6 +1,6 @@
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
         Query, Request,
     },
     http::{header, Method, StatusCode},
@@ -30,10 +30,11 @@ use std::{
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use tower_http::cors::CorsLayer;
 
+mod herdr;
 mod tmux_discovery;
 
 use tmux_discovery::{DiscoverySnapshot, GitRootCache};
@@ -66,10 +67,14 @@ pub struct AppState {
     git_contexts: Arc<Mutex<HashMap<String, String>>>,
     tmux_snapshot: Arc<Mutex<DiscoverySnapshot>>,
     tmux_scan_trigger: Arc<tokio::sync::Notify>,
+    herdr_controllers: Arc<Mutex<HashMap<String, mpsc::Sender<HerdrInput>>>>,
+    herdr_snapshot: Arc<Mutex<serde_json::Value>>,
+    herdr_event_tx: broadcast::Sender<serde_json::Value>,
 }
 
 impl AppState {
     pub fn new(shell: impl Into<String>, static_dir: PathBuf) -> Self {
+        let (herdr_event_tx, _) = broadcast::channel(256);
         Self {
             shell: shell.into(),
             static_dir,
@@ -77,6 +82,15 @@ impl AppState {
             git_contexts: Arc::new(Mutex::new(HashMap::new())),
             tmux_snapshot: Arc::new(Mutex::new(DiscoverySnapshot::default())),
             tmux_scan_trigger: Arc::new(tokio::sync::Notify::new()),
+            herdr_controllers: Arc::new(Mutex::new(HashMap::new())),
+            herdr_snapshot: Arc::new(Mutex::new(serde_json::json!({
+                "mux": "herdr",
+                "protocol": herdr::SUPPORTED_PROTOCOL,
+                "panes": [],
+                "workspaces": [],
+                "agents": [],
+            }))),
+            herdr_event_tx,
         }
     }
 }
@@ -105,6 +119,7 @@ pub async fn run() {
     let state = AppState::new(cli.shell.clone(), cli.static_dir.clone());
 
     start_tmux_discovery(state.clone());
+    start_herdr_events(state.clone());
 
     // Build router
     let app = build_router(state);
@@ -193,6 +208,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/tmux/pane-mode", get(api_tmux_pane_mode))
         .route("/api/tmux/capture-pane", get(api_tmux_capture_pane))
         .route("/api/tmux/page-up", get(api_tmux_page_up))
+        .route("/api/herdr/list", get(api_herdr_list))
+        .route("/api/herdr/focus", get(api_herdr_focus))
+        .route("/api/herdr/create", get(api_herdr_create))
+        .route("/api/herdr/close", get(api_herdr_close))
+        .route("/api/herdr/release", get(api_herdr_release))
+        .route("/api/herdr/quick-shell", get(api_herdr_quick_shell))
+        .route("/api/herdr/pane-mode", get(api_herdr_pane_mode))
+        .route("/api/herdr/capture-pane", get(api_herdr_capture_pane))
+        .route("/api/herdr/page-up", get(api_herdr_page_up))
         .route("/api/events", get(api_events))
         .route("/api/dump-file", post(api_dump_file))
         .route(
@@ -283,6 +307,175 @@ fn trigger_tmux_scan(state: &AppState) {
     state.tmux_scan_trigger.notify_one();
 }
 
+fn start_herdr_events(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            match herdr::protocol_version().await {
+                Ok(protocol) if protocol == herdr::SUPPORTED_PROTOCOL => break,
+                Ok(protocol) => {
+                    tracing::error!(
+                        "Unsupported herdr protocol {}; expected {}",
+                        protocol,
+                        herdr::SUPPORTED_PROTOCOL
+                    );
+                }
+                Err(error) => tracing::warn!("Herdr protocol check failed: {}", error),
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+
+        loop {
+            match run_herdr_event_session(&state).await {
+                Ok(()) => continue,
+                Err(error) => tracing::warn!("Herdr event subscription failed: {}", error),
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
+async fn run_herdr_event_session(state: &AppState) -> Result<(), String> {
+    let snapshot = herdr::list().await?;
+    let pane_ids = herdr_pane_ids(&snapshot);
+    publish_herdr_snapshot(state, snapshot, None);
+
+    let mut subscription = herdr::EventSubscription::connect(&pane_ids).await?;
+    tracing::info!(
+        "Herdr events subscribed for {} pane{}",
+        pane_ids.len(),
+        if pane_ids.len() == 1 { "" } else { "s" }
+    );
+    let mut maintenance = tokio::time::interval(Duration::from_secs(2));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    maintenance.tick().await;
+    let mut status_overrides = HashMap::<String, String>::new();
+
+    loop {
+        tokio::select! {
+            event = subscription.next_event() => {
+                let event = event?;
+                if let Some((pane_id, status)) = herdr_status_event(&event) {
+                    status_overrides.insert(pane_id, status);
+                }
+                let mut snapshot = herdr::list().await?;
+                apply_herdr_status_overrides(&mut snapshot, &status_overrides);
+                let next_pane_ids = herdr_pane_ids(&snapshot);
+                publish_herdr_snapshot(state, snapshot, Some(event));
+                if next_pane_ids != pane_ids {
+                    return Ok(());
+                }
+            }
+            _ = maintenance.tick() => {
+                let mut snapshot = herdr::list().await?;
+                status_overrides.retain(|pane_id, status| {
+                    herdr_snapshot_status(&snapshot, pane_id).as_deref() != Some(status.as_str())
+                });
+                apply_herdr_status_overrides(&mut snapshot, &status_overrides);
+                let next_pane_ids = herdr_pane_ids(&snapshot);
+                publish_herdr_snapshot(state, snapshot, None);
+                if next_pane_ids != pane_ids {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn herdr_status_event(event: &serde_json::Value) -> Option<(String, String)> {
+    if event.get("event")?.as_str()? != "pane.agent_status_changed" {
+        return None;
+    }
+    let data = event.get("data")?;
+    Some((
+        data.get("pane_id")?.as_str()?.to_string(),
+        data.get("agent_status")?.as_str()?.to_string(),
+    ))
+}
+
+fn apply_herdr_status_overrides(
+    snapshot: &mut serde_json::Value,
+    overrides: &HashMap<String, String>,
+) {
+    for collection in ["panes", "agents"] {
+        let Some(items) = snapshot
+            .get_mut(collection)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for item in items {
+            let Some(pane_id) = item
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if let Some(status) = overrides.get(&pane_id) {
+                item["agent_status"] = serde_json::Value::String(status.clone());
+            }
+        }
+    }
+}
+
+fn herdr_snapshot_status(snapshot: &serde_json::Value, pane_id: &str) -> Option<String> {
+    for collection in ["agents", "panes"] {
+        if let Some(status) = snapshot
+            .get(collection)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|item| item.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane_id))
+            .and_then(|item| item.get("agent_status"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Some(status.to_string());
+        }
+    }
+    None
+}
+
+fn publish_herdr_snapshot(
+    state: &AppState,
+    snapshot: serde_json::Value,
+    source_event: Option<serde_json::Value>,
+) {
+    let previous = get_herdr_snapshot(state);
+    let changed = previous != snapshot;
+    if changed {
+        if let Ok(mut current) = state.herdr_snapshot.lock() {
+            *current = snapshot.clone();
+        }
+    }
+    if changed || source_event.is_some() {
+        let _ = state.herdr_event_tx.send(serde_json::json!({
+            "herdr": snapshot,
+            "event": source_event,
+        }));
+    }
+}
+
+fn herdr_pane_ids(snapshot: &serde_json::Value) -> Vec<String> {
+    let mut pane_ids = snapshot
+        .get("panes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|pane| pane.get("pane_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    pane_ids.sort();
+    pane_ids
+}
+
+fn get_herdr_snapshot(state: &AppState) -> serde_json::Value {
+    state
+        .herdr_snapshot
+        .lock()
+        .map(|snapshot| snapshot.clone())
+        .unwrap_or_else(|_| serde_json::json!({}))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // STATIC FILE SERVING
 // ═══════════════════════════════════════════════════════════════════════════
@@ -343,12 +536,250 @@ async fn serve_file(path: &Path) -> Response {
 // WEBSOCKET TERMINAL (ttyd protocol compatible)
 // ═══════════════════════════════════════════════════════════════════════════
 
+#[derive(Deserialize)]
+struct WebSocketQuery {
+    mux: Option<String>,
+    pane: Option<String>,
+}
+
 async fn ws_handler(
-    ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<WebSocketQuery>,
+    ws: WebSocketUpgrade,
 ) -> Response {
-    ws.protocols(["tty"])
-        .on_upgrade(move |socket| handle_terminal(socket, state))
+    match query.mux.as_deref() {
+        Some("herdr") => {
+            let pane_id = match query.pane.filter(|pane| !pane.trim().is_empty()) {
+                Some(pane_id) => pane_id,
+                None => {
+                    return json_error(
+                        "missing_pane",
+                        "pane is required when mux=herdr",
+                        StatusCode::BAD_REQUEST,
+                    )
+                }
+            };
+            let herdr_state = state.clone();
+            ws.protocols(["tty"])
+                .on_upgrade(move |socket| handle_herdr_terminal(socket, herdr_state, pane_id))
+        }
+        Some(other) => json_error(
+            "invalid_mux",
+            &format!("Unsupported terminal multiplexer: {}", other),
+            StatusCode::BAD_REQUEST,
+        ),
+        None => ws
+            .protocols(["tty"])
+            .on_upgrade(move |socket| handle_terminal(socket, state)),
+    }
+}
+
+enum HerdrInput {
+    Data(bytes::Bytes),
+    Resize { cols: u16, rows: u16 },
+    Scroll { direction: String, lines: u32 },
+    Release,
+}
+
+async fn handle_herdr_terminal(socket: WebSocket, state: AppState, pane_id: String) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    let (init_cols, init_rows) = match ws_receiver.next().await {
+        Some(Ok(message)) => parse_init_message(message),
+        _ => {
+            tracing::error!("No init message received for herdr pane {}", pane_id);
+            return;
+        }
+    };
+    tracing::info!(
+        "Herdr terminal session {}: {}x{}",
+        pane_id,
+        init_cols,
+        init_rows
+    );
+
+    let controller = match herdr::TerminalController::spawn(&pane_id, init_cols, init_rows).await {
+        Ok(controller) => controller,
+        Err(error) => {
+            tracing::error!("{}", error);
+            let mut frame = BytesMut::with_capacity(error.len() + 32);
+            frame.put_u8(0x30);
+            frame.extend_from_slice(format!("\r\n[Herdr] {}\r\n", error).as_bytes());
+            let _ = ws_sender.send(Message::Binary(frame.freeze())).await;
+            let _ = ws_sender
+                .send(Message::Close(Some(CloseFrame {
+                    code: close_code::ERROR,
+                    reason: error.chars().take(120).collect::<String>().into(),
+                })))
+                .await;
+            return;
+        }
+    };
+    let (_process, mut terminal_reader, mut terminal_writer) = controller.split();
+
+    let (output_tx, mut output_rx) = mpsc::channel::<herdr::TerminalEvent>(256);
+    let reader_output_tx = output_tx.clone();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match terminal_reader.next_event().await {
+                Ok(event @ herdr::TerminalEvent::Frame(_)) => {
+                    if reader_output_tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(event @ herdr::TerminalEvent::Closed(_)) => {
+                    let _ = reader_output_tx.send(event).await;
+                    break;
+                }
+                Err(error) => {
+                    let _ = reader_output_tx
+                        .send(herdr::TerminalEvent::Closed(error))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let (input_tx, mut input_rx) = mpsc::channel::<HerdrInput>(256);
+    let writer_output_tx = output_tx.clone();
+    let writer_task = tokio::spawn(async move {
+        while let Some(command) = input_rx.recv().await {
+            let result = match command {
+                HerdrInput::Data(data) => terminal_writer.send_input(&data).await,
+                HerdrInput::Resize { cols, rows } => terminal_writer.resize(cols, rows).await,
+                HerdrInput::Scroll { direction, lines } => {
+                    terminal_writer.scroll(&direction, lines).await
+                }
+                HerdrInput::Release => {
+                    let result = terminal_writer.release().await;
+                    if result.is_ok() {
+                        break;
+                    }
+                    result
+                }
+            };
+            if let Err(error) = result {
+                let _ = writer_output_tx
+                    .send(herdr::TerminalEvent::Closed(error))
+                    .await;
+                break;
+            }
+        }
+    });
+    drop(output_tx);
+
+    if let Ok(mut controllers) = state.herdr_controllers.lock() {
+        controllers.insert(pane_id.clone(), input_tx.clone());
+    }
+
+    let mut sender_task = tokio::spawn(async move {
+        while let Some(event) = output_rx.recv().await {
+            match event {
+                herdr::TerminalEvent::Frame(data) => {
+                    let mut frame = BytesMut::with_capacity(data.len() + 1);
+                    frame.put_u8(0x30);
+                    frame.extend_from_slice(&data);
+                    if ws_sender
+                        .send(Message::Binary(frame.freeze()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                herdr::TerminalEvent::Closed(reason) => {
+                    let mut frame = BytesMut::with_capacity(reason.len() + 32);
+                    frame.put_u8(0x30);
+                    frame.extend_from_slice(
+                        format!("\r\n[Herdr] Connection closed: {}\r\n", reason).as_bytes(),
+                    );
+                    let _ = ws_sender.send(Message::Binary(frame.freeze())).await;
+                    let _ = ws_sender
+                        .send(Message::Close(Some(CloseFrame {
+                            code: close_code::NORMAL,
+                            reason: reason.chars().take(120).collect::<String>().into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
+    let receiver_input_tx = input_tx.clone();
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(message)) = ws_receiver.next().await {
+            match message {
+                Message::Binary(data) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    let command = match data[0] {
+                        0x30 => Some(HerdrInput::Data(bytes::Bytes::copy_from_slice(&data[1..]))),
+                        0x31 => std::str::from_utf8(&data[1..])
+                            .ok()
+                            .and_then(|text| serde_json::from_str::<ResizeMessage>(text).ok())
+                            .map(|resize| HerdrInput::Resize {
+                                cols: resize.columns,
+                                rows: resize.rows,
+                            }),
+                        _ => None,
+                    };
+                    if let Some(command) = command {
+                        if receiver_input_tx.send(command).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Message::Text(text) => {
+                    let Ok(resize) = serde_json::from_str::<ResizeMessage>(text.as_str()) else {
+                        continue;
+                    };
+                    if receiver_input_tx
+                        .send(HerdrInput::Resize {
+                            cols: resize.columns,
+                            rows: resize.rows,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+        let _ = receiver_input_tx.send(HerdrInput::Release).await;
+    });
+
+    tokio::select! {
+        _ = &mut sender_task => {
+            recv_task.abort();
+            let _ = recv_task.await;
+        }
+        _ = &mut recv_task => {
+            let _ = input_tx.send(HerdrInput::Release).await;
+            sender_task.abort();
+            let _ = sender_task.await;
+        }
+    }
+
+    reader_task.abort();
+    let _ = reader_task.await;
+    if let Ok(mut controllers) = state.herdr_controllers.lock() {
+        let should_remove = controllers
+            .get(&pane_id)
+            .map(|sender| sender.same_channel(&input_tx))
+            .unwrap_or(false);
+        if should_remove {
+            controllers.remove(&pane_id);
+        }
+    }
+    drop(input_tx);
+    let _ = writer_task.await;
+    tracing::info!("Herdr terminal session {} ended", pane_id);
 }
 
 async fn handle_terminal(socket: WebSocket, state: AppState) {
@@ -2305,6 +2736,351 @@ fn apply_patch(git_root: &str, patch: &str, args: &[&str]) -> Result<String, Str
 
 // ─── Tmux Operations ──────────────────────────────────────────────────────
 
+// ─── GET /api/herdr/list ──────────────────────────────────────────────────
+
+async fn api_herdr_list() -> Response {
+    match herdr::list().await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => {
+            tracing::warn!("Failed to list herdr panes: {}", error);
+            json_error("herdr_unavailable", &error, StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HerdrPaneQuery {
+    pane: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HerdrCreateQuery {
+    name: Option<String>,
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HerdrCloseQuery {
+    pane: Option<String>,
+    workspace: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HerdrQuickShellQuery {
+    pane: Option<String>,
+    cwd: Option<String>,
+    direction: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HerdrPaneModeQuery {
+    pane: Option<String>,
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HerdrCaptureQuery {
+    pane: Option<String>,
+    lines: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct HerdrPageQuery {
+    pane: Option<String>,
+    page: Option<u32>,
+}
+
+async fn api_herdr_focus(Query(query): Query<HerdrPaneQuery>) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    match herdr::request("pane.focus", serde_json::json!({ "pane_id": pane_id })).await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "paneId": pane_id,
+            "result": result,
+        }))
+        .into_response(),
+        Err(error) => herdr_operation_error("focus_failed", error),
+    }
+}
+
+async fn api_herdr_create(Query(query): Query<HerdrCreateQuery>) -> Response {
+    let name = match query.name.filter(|name| !name.trim().is_empty()) {
+        Some(name) => name,
+        None => {
+            return json_error(
+                "missing_name",
+                "Workspace name required",
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    let mut params = serde_json::json!({
+        "label": name,
+        "focus": true,
+    });
+    if let Some(cwd) = query.cwd.filter(|cwd| !cwd.trim().is_empty()) {
+        params["cwd"] = serde_json::Value::String(cwd);
+    }
+    match herdr::request("workspace.create", params).await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "paneId": find_herdr_pane_id(&result),
+            "result": result,
+        }))
+        .into_response(),
+        Err(error) => herdr_operation_error("create_failed", error),
+    }
+}
+
+async fn api_herdr_close(Query(query): Query<HerdrCloseQuery>) -> Response {
+    let (method, params, target) = match (query.pane, query.workspace) {
+        (Some(pane_id), None) if !pane_id.trim().is_empty() => (
+            "pane.close",
+            serde_json::json!({ "pane_id": pane_id }),
+            pane_id,
+        ),
+        (None, Some(workspace_id)) if !workspace_id.trim().is_empty() => (
+            "workspace.close",
+            serde_json::json!({ "workspace_id": workspace_id }),
+            workspace_id,
+        ),
+        _ => {
+            return json_error(
+                "missing_target",
+                "Exactly one pane or workspace target is required",
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    match herdr::request(method, params).await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "target": target,
+            "result": result,
+        }))
+        .into_response(),
+        Err(error) => herdr_operation_error("close_failed", error),
+    }
+}
+
+async fn api_herdr_release(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<HerdrPaneQuery>,
+) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    match active_herdr_controller(&state, &pane_id) {
+        Some(sender) => match sender.send(HerdrInput::Release).await {
+            Ok(()) => {
+                Json(serde_json::json!({ "success": true, "paneId": pane_id })).into_response()
+            }
+            Err(error) => herdr_operation_error("release_failed", error.to_string()),
+        },
+        None => json_error(
+            "controller_not_found",
+            "No active rust-terminal controller for this pane",
+            StatusCode::CONFLICT,
+        ),
+    }
+}
+
+async fn api_herdr_quick_shell(Query(query): Query<HerdrQuickShellQuery>) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    let direction = query.direction.unwrap_or_else(|| "right".to_string());
+    if direction != "right" && direction != "down" {
+        return json_error(
+            "invalid_direction",
+            "direction must be right or down",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    let mut params = serde_json::json!({
+        "target_pane_id": pane_id,
+        "direction": direction,
+        "focus": true,
+    });
+    if let Some(cwd) = query.cwd.filter(|cwd| !cwd.trim().is_empty()) {
+        params["cwd"] = serde_json::Value::String(cwd);
+    }
+    match herdr::request("pane.split", params).await {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "mode": "split",
+            "paneId": find_herdr_pane_id(&result),
+            "result": result,
+        }))
+        .into_response(),
+        Err(error) => herdr_operation_error("quick_shell_failed", error),
+    }
+}
+
+async fn api_herdr_pane_mode(Query(query): Query<HerdrPaneModeQuery>) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    let mode = query.mode.unwrap_or_else(|| "toggle".to_string());
+    if !matches!(mode.as_str(), "toggle" | "on" | "off") {
+        return json_error(
+            "invalid_mode",
+            "mode must be toggle, on, or off",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    match herdr::request(
+        "pane.zoom",
+        serde_json::json!({ "pane_id": pane_id, "mode": mode }),
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "paneId": pane_id,
+            "mode": mode,
+            "result": result,
+        }))
+        .into_response(),
+        Err(error) => herdr_operation_error("pane_mode_failed", error),
+    }
+}
+
+async fn api_herdr_capture_pane(Query(query): Query<HerdrCaptureQuery>) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    let lines = query.lines.unwrap_or(1000).clamp(1, 10000);
+    match herdr::request(
+        "pane.read",
+        serde_json::json!({
+            "pane_id": pane_id,
+            "source": "recent",
+            "lines": lines,
+            "strip_ansi": true,
+            "format": "text",
+        }),
+    )
+    .await
+    {
+        Ok(result) => {
+            let text = result
+                .get("read")
+                .and_then(|read| read.get("text"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Json(serde_json::json!({
+                "lines": text.lines().collect::<Vec<_>>(),
+                "paneId": pane_id,
+                "result": result,
+            }))
+            .into_response()
+        }
+        Err(error) => herdr_operation_error("capture_failed", error),
+    }
+}
+
+async fn api_herdr_page_up(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Query(query): Query<HerdrPageQuery>,
+) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    let page = query.page.unwrap_or(1).clamp(1, 100);
+    let scroll_lines = page.saturating_mul(24);
+    let sender = match active_herdr_controller(&state, &pane_id) {
+        Some(sender) => sender,
+        None => {
+            return json_error(
+                "controller_not_found",
+                "No active rust-terminal controller for this pane",
+                StatusCode::CONFLICT,
+            )
+        }
+    };
+    if let Err(error) = sender
+        .send(HerdrInput::Scroll {
+            direction: "up".to_string(),
+            lines: scroll_lines,
+        })
+        .await
+    {
+        return herdr_operation_error("scroll_failed", error.to_string());
+    }
+    let capture_lines = page.saturating_mul(200).clamp(1, 10000);
+    match herdr::request(
+        "pane.read",
+        serde_json::json!({
+            "pane_id": pane_id,
+            "source": "recent",
+            "lines": capture_lines,
+            "strip_ansi": true,
+            "format": "text",
+        }),
+    )
+    .await
+    {
+        Ok(result) => {
+            let text = result
+                .get("read")
+                .and_then(|read| read.get("text"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Json(serde_json::json!({
+                "success": true,
+                "paneId": pane_id,
+                "page": page,
+                "lines": text.lines().collect::<Vec<_>>(),
+            }))
+            .into_response()
+        }
+        Err(error) => herdr_operation_error("scroll_failed", error),
+    }
+}
+
+fn required_herdr_pane(pane: Option<String>) -> Result<String, ()> {
+    pane.filter(|pane| !pane.trim().is_empty()).ok_or(())
+}
+
+fn missing_herdr_pane_response() -> Response {
+    json_error("missing_pane", "pane is required", StatusCode::BAD_REQUEST)
+}
+
+fn active_herdr_controller(state: &AppState, pane_id: &str) -> Option<mpsc::Sender<HerdrInput>> {
+    state
+        .herdr_controllers
+        .lock()
+        .ok()
+        .and_then(|controllers| controllers.get(pane_id).cloned())
+}
+
+fn herdr_operation_error(code: &str, error: String) -> Response {
+    tracing::warn!("herdr operation failed: {}", error);
+    json_error(code, &error, StatusCode::BAD_GATEWAY)
+}
+
+fn find_herdr_pane_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(pane_id) = object.get("pane_id").and_then(serde_json::Value::as_str) {
+                return Some(pane_id.to_string());
+            }
+            object.values().find_map(find_herdr_pane_id)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(find_herdr_pane_id),
+        _ => None,
+    }
+}
+
 fn get_current_tmux_session(client_tty: Option<&str>) -> Option<String> {
     let tty = client_tty?;
 
@@ -2925,12 +3701,54 @@ async fn api_tmux_page_up(
 #[derive(Deserialize)]
 struct EventsQuery {
     client_tty: Option<String>,
+    mux: Option<String>,
+    #[allow(dead_code)]
+    pane: Option<String>,
 }
 
 async fn api_events(
     axum::extract::State(state): axum::extract::State<AppState>,
     Query(query): Query<EventsQuery>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
+    if query.mux.as_deref() == Some("herdr") {
+        let receiver = state.herdr_event_tx.subscribe();
+        let initial_state = state.clone();
+        let stream = futures_util::stream::unfold(
+            (true, receiver, initial_state),
+            move |(is_first, mut receiver, shared_state)| async move {
+                if is_first {
+                    let payload = serde_json::json!({
+                        "herdr": get_herdr_snapshot(&shared_state),
+                        "event": null,
+                    });
+                    return Some((
+                        Ok::<Event, Infallible>(Event::default().data(payload.to_string())),
+                        (false, receiver, shared_state),
+                    ));
+                }
+                loop {
+                    match receiver.recv().await {
+                        Ok(payload) => {
+                            return Some((
+                                Ok::<Event, Infallible>(Event::default().data(payload.to_string())),
+                                (false, receiver, shared_state),
+                            ));
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            },
+        );
+        return Sse::new(stream)
+            .keep_alive(
+                KeepAlive::new()
+                    .interval(Duration::from_secs(15))
+                    .text("keep-alive"),
+            )
+            .into_response();
+    }
+
     let explicit_tty = query.client_tty.clone();
     let shared_state = state.clone();
 
@@ -3002,20 +3820,22 @@ async fn api_events(
                 let comparison_json = comparison_payload.to_string();
                 if !is_first && comparison_json == prev_json {
                     return Some((
-                        Ok(Event::default().comment("no-change")),
+                        Ok::<Event, Infallible>(Event::default().comment("no-change")),
                         (false, prev_json),
                     ));
                 }
                 let event = Event::default().data(json_str.clone());
-                Some((Ok(event), (false, comparison_json)))
+                Some((Ok::<Event, Infallible>(event), (false, comparison_json)))
             }
         });
 
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    )
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 // ─── GET/POST /api/user-config ─────────────────────────────────────────────
@@ -4901,5 +5721,35 @@ mod tests {
         assert!(value["projectGroups"].is_array());
         assert!(value["otherSessions"].is_array());
         assert!(value.get("currentSession").is_some());
+    }
+
+    #[test]
+    fn herdr_snapshot_helper_sorts_pane_ids() {
+        let mut snapshot = serde_json::json!({
+            "panes": [
+                { "pane_id": "w2:p1", "agent_status": "unknown" },
+                { "pane_id": "w1:p1", "agent_status": "idle" },
+            ],
+            "agents": [
+                { "pane_id": "w2:p1", "agent_status": "working" },
+            ],
+        });
+        assert_eq!(herdr_pane_ids(&snapshot), vec!["w1:p1", "w2:p1"]);
+        let event = serde_json::json!({
+            "event": "pane.agent_status_changed",
+            "data": { "pane_id": "w2:p1", "agent_status": "blocked" },
+        });
+        assert_eq!(
+            herdr_status_event(&event),
+            Some(("w2:p1".to_string(), "blocked".to_string()))
+        );
+        apply_herdr_status_overrides(
+            &mut snapshot,
+            &HashMap::from([("w2:p1".to_string(), "blocked".to_string())]),
+        );
+        assert_eq!(
+            herdr_snapshot_status(&snapshot, "w2:p1").as_deref(),
+            Some("blocked")
+        );
     }
 }
