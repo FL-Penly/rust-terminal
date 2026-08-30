@@ -8,7 +8,7 @@ import { GitPanel } from './GitPanel'
 const hapticTap = () => { try { navigator.vibrate?.(8) } catch {} }
 
 export const Toolbar: React.FC = () => {
-  const { sendKey, sendInput, pasteInput } = useTerminal()
+  const { sendKey, sendInput, submitText } = useTerminal()
   const [config, setConfig] = useState<UserConfig>(DEFAULT_CONFIG)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isInputOpen, setIsInputOpen] = useState(false)
@@ -97,7 +97,7 @@ export const Toolbar: React.FC = () => {
         <TextInputModal
           isOpen={isInputOpen}
           onClose={() => setIsInputOpen(false)}
-          onSend={pasteInput}
+          onSend={submitText}
           presetGroups={config.presetGroups}
           activePresetGroupId={config.activePresetGroupId}
           onActivePresetGroupChange={setActivePresetGroup}

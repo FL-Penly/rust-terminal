@@ -217,6 +217,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/herdr/pane-mode", get(api_herdr_pane_mode))
         .route("/api/herdr/capture-pane", get(api_herdr_capture_pane))
         .route("/api/herdr/page-up", get(api_herdr_page_up))
+        .route("/api/herdr/paste", post(api_herdr_paste))
         .route("/api/events", get(api_events))
         .route("/api/dump-file", post(api_dump_file))
         .route(
@@ -2786,6 +2787,11 @@ struct HerdrPageQuery {
     page: Option<u32>,
 }
 
+#[derive(Deserialize)]
+struct HerdrPasteRequest {
+    text: String,
+}
+
 async fn api_herdr_focus(Query(query): Query<HerdrPaneQuery>) -> Response {
     let pane_id = match required_herdr_pane(query.pane) {
         Ok(pane_id) => pane_id,
@@ -2800,6 +2806,77 @@ async fn api_herdr_focus(Query(query): Query<HerdrPaneQuery>) -> Response {
         .into_response(),
         Err(error) => herdr_operation_error("focus_failed", error),
     }
+}
+
+// ─── POST /api/herdr/paste ─────────────────────────────────────────────────────
+
+async fn api_herdr_paste(
+    Query(query): Query<HerdrPaneQuery>,
+    Json(body): Json<HerdrPasteRequest>,
+) -> Response {
+    let pane_id = match required_herdr_pane(query.pane) {
+        Ok(pane_id) => pane_id,
+        Err(()) => return missing_herdr_pane_response(),
+    };
+    if body.text.is_empty() {
+        return json_error(
+            "missing_text",
+            "paste text is required",
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
+    let agent = match herdr::request("agent.get", serde_json::json!({ "target": pane_id })).await {
+        Ok(result) => result,
+        Err(error) => return herdr_operation_error("agent_lookup_failed", error),
+    };
+    if !is_interactive_codex_agent(&agent) {
+        return json_error(
+            "agent_input_unavailable",
+            "The target pane is not an interactive Codex input",
+            StatusCode::CONFLICT,
+        );
+    }
+
+    let byte_length = body.text.len();
+    match herdr::request(
+        "pane.send_text",
+        serde_json::json!({
+            "pane_id": pane_id,
+            "text": bracketed_paste_text(&body.text),
+        }),
+    )
+    .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "paneId": pane_id,
+            "byteLength": byte_length,
+            "result": result,
+        }))
+        .into_response(),
+        Err(error) => herdr_operation_error("paste_failed", error),
+    }
+}
+
+fn is_interactive_codex_agent(result: &serde_json::Value) -> bool {
+    let Some(agent) = result.get("agent") else {
+        return false;
+    };
+    let is_codex = agent
+        .get("agent")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("codex"));
+    let is_interactive = agent
+        .get("interactive_ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false);
+    is_codex && is_interactive
+}
+
+fn bracketed_paste_text(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+    format!("\x1b[200~{}\x1b[201~", normalized)
 }
 
 async fn api_herdr_create(Query(query): Query<HerdrCreateQuery>) -> Response {
@@ -5747,6 +5824,28 @@ mod tests {
             herdr_snapshot_status(&snapshot, "w2:p1").as_deref(),
             Some("blocked")
         );
+    }
+
+    #[test]
+    fn herdr_bracketed_paste_preserves_text_without_pressing_enter() {
+        let text = "第一行\n\n```rust\nlet value = \"保持原样\";\n```\n😀";
+        assert_eq!(
+            bracketed_paste_text(text),
+            "\x1b[200~第一行\r\r```rust\rlet value = \"保持原样\";\r```\r😀\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn herdr_paste_accepts_only_interactive_codex_agents() {
+        assert!(is_interactive_codex_agent(&serde_json::json!({
+            "agent": { "agent": "codex", "interactive_ready": true }
+        })));
+        assert!(!is_interactive_codex_agent(&serde_json::json!({
+            "agent": { "agent": "codex", "interactive_ready": false }
+        })));
+        assert!(!is_interactive_codex_agent(&serde_json::json!({
+            "agent": { "agent": "claude", "interactive_ready": true }
+        })));
     }
 
     #[test]

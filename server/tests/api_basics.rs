@@ -1,7 +1,9 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{assert_status, body_json, send_get, send_post_bytes, test_app, EnvGuard};
+use common::{
+    assert_status, body_json, send_get, send_post_bytes, send_post_json, test_app, EnvGuard,
+};
 use serde_json::json;
 use serial_test::serial;
 
@@ -172,6 +174,34 @@ async fn json_error_envelope_for_invalid_herdr_close() {
     assert_status(&resp, StatusCode::BAD_REQUEST);
     let body = body_json(resp).await;
     assert_eq!(body["error"], "missing_target");
+}
+
+#[tokio::test]
+async fn herdr_paste_requires_a_target_pane() {
+    let resp = send_post_json(
+        test_app(),
+        "/api/herdr/paste",
+        serde_json::json!({ "text": "first\nsecond" }),
+    )
+    .await;
+    let status = resp.status();
+    let body = body_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "missing_pane");
+}
+
+#[tokio::test]
+async fn herdr_paste_rejects_empty_text_before_contacting_herdr() {
+    let resp = send_post_json(
+        test_app(),
+        "/api/herdr/paste?pane=w1%3Ap1",
+        serde_json::json!({ "text": "" }),
+    )
+    .await;
+    let status = resp.status();
+    let body = body_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "missing_text");
 }
 
 #[tokio::test]

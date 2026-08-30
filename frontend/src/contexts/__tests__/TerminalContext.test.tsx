@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   TerminalProvider,
   useTerminal,
+  type InputSendResult,
   type TerminalContextValue,
 } from '../TerminalContext'
 
@@ -80,6 +81,74 @@ describe('TerminalContext', () => {
     expect(MockWebSocket.instances[0].url).toMatch(/\/ws\?mux=herdr&pane=w4%3Ap1$/)
     expect(getContext().mux).toBe('herdr')
     expect(getContext().paneId).toBe('w4:p1')
+  })
+
+  it('pastes multiline Herdr text through the acknowledged Codex paste API', async () => {
+    window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    const text = '第一行\n第二行 😀'
+    const byteLength = new TextEncoder().encode(text).byteLength
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ success: true, byteLength }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+    render(<TerminalProvider><ContextCapture /></TerminalProvider>)
+
+    await expect(getContext().submitText(text)).resolves.toEqual({ ok: true, byteLength })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/herdr/paste?pane=w4%3Ap1',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ text }),
+      }),
+    )
+  })
+
+  it('returns the Herdr paste error without reporting a false success', async () => {
+    window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ error: 'agent_input_unavailable', message: 'not a Codex input' }),
+      { status: 502, headers: { 'Content-Type': 'application/json' } },
+    ))
+    render(<TerminalProvider><ContextCapture /></TerminalProvider>)
+
+    await expect(getContext().submitText('first\nsecond')).resolves.toEqual({
+      ok: false,
+      reason: 'sendFailed',
+      message: 'not a Codex input',
+    })
+  })
+
+  it('keeps single-line Herdr input on the existing terminal paste path', async () => {
+    window.history.replaceState({}, '', '/?mux=herdr&pane=w4%3Ap1')
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    render(<TerminalProvider><ContextCapture /></TerminalProvider>)
+    const pasteResult: InputSendResult = { ok: true, byteLength: 11 }
+    const pasteHandler = vi.fn(() => pasteResult)
+    getContext().registerPasteHandler(pasteHandler)
+
+    await expect(getContext().submitText('single line')).resolves.toEqual(pasteResult)
+    expect(pasteHandler).toHaveBeenCalledWith('single line')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('does not weaken the multiline safety gate outside Herdr', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    render(<TerminalProvider><ContextCapture /></TerminalProvider>)
+    const pasteHandler = vi.fn((): InputSendResult => ({
+      ok: false,
+      reason: 'unsafeMultiline',
+    }))
+    getContext().registerPasteHandler(pasteHandler)
+
+    await expect(getContext().submitText('first\nsecond')).resolves.toEqual({
+      ok: false,
+      reason: 'unsafeMultiline',
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('does not gate a visible herdr page on unreliable document focus', () => {

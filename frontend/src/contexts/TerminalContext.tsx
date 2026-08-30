@@ -7,7 +7,7 @@ export type InputFailureReason = 'disconnected' | 'terminalUnavailable' | 'sendF
 
 export type InputSendResult =
   | { ok: true; byteLength: number }
-  | { ok: false; reason: InputFailureReason }
+  | { ok: false; reason: InputFailureReason; message?: string }
 
 export type PasteInputHandler = (text: string) => InputSendResult
 
@@ -19,6 +19,8 @@ export interface TerminalContextValue {
   sendInput: (text: string) => InputSendResult
 
   pasteInput: (text: string) => InputSendResult
+
+  submitText: (text: string) => Promise<InputSendResult>
 
   registerPasteHandler: (handler: PasteInputHandler) => () => void
   
@@ -552,6 +554,50 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return handler(text)
   }, [])
 
+  const submitText = useCallback(async (text: string): Promise<InputSendResult> => {
+    const currentTarget = targetRef.current
+    if (currentTarget.mux !== 'herdr' || !/\r|\n/.test(text)) {
+      return pasteInput(text)
+    }
+    if (!currentTarget.paneId) {
+      return { ok: false, reason: 'terminalUnavailable' }
+    }
+
+    try {
+      // Herdr redraw frames do not replay DEC bracketed-paste mode, so xterm cannot
+      // safely infer it. Ask the server to verify Codex and paste without pressing Enter.
+      const response = await fetch(
+        `/api/herdr/paste?pane=${encodeURIComponent(currentTarget.paneId)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+          signal: AbortSignal.timeout(30000),
+        },
+      )
+      const payload: unknown = await response.json().catch(() => null)
+      if (!response.ok) {
+        const message = payload && typeof payload === 'object' && 'message' in payload
+          && typeof payload.message === 'string'
+          ? payload.message
+          : `Herdr paste failed (${response.status})`
+        return { ok: false, reason: 'sendFailed', message }
+      }
+      const byteLength = payload && typeof payload === 'object' && 'byteLength' in payload
+        && typeof payload.byteLength === 'number'
+        ? payload.byteLength
+        : new TextEncoder().encode(text).byteLength
+      return { ok: true, byteLength }
+    } catch (err) {
+      console.error('[Terminal] Failed to paste into Herdr Codex:', err)
+      return {
+        ok: false,
+        reason: 'sendFailed',
+        message: '无法将内容粘贴到 Herdr Codex，内容已保留，请重试。',
+      }
+    }
+  }, [pasteInput])
+
   const registerPasteHandler = useCallback((handler: PasteInputHandler) => {
     pasteHandlerRef.current = handler
     return () => {
@@ -608,6 +654,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     connectionState,
     sendInput,
     pasteInput,
+    submitText,
     registerPasteHandler,
     sendKey,
     subscribeOutput,
@@ -623,7 +670,7 @@ export const TerminalProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     switchTerminal,
     disconnectReason,
     takeoverDetected,
-  }), [connectionState, sendInput, pasteInput, registerPasteHandler, sendKey, subscribeOutput, sendControl, terminalRef, resize, reconnect, reconnectAttempt, clientTty, setClientTtyValue, target, switchTerminal, disconnectReason, takeoverDetected])
+  }), [connectionState, sendInput, pasteInput, submitText, registerPasteHandler, sendKey, subscribeOutput, sendControl, terminalRef, resize, reconnect, reconnectAttempt, clientTty, setClientTtyValue, target, switchTerminal, disconnectReason, takeoverDetected])
 
   return (
     <TerminalContext.Provider value={contextValue}>

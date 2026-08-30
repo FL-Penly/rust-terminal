@@ -135,7 +135,7 @@ const applyVariablesToPrompt = (text: string, values: Record<string, string>): s
 interface TextInputBarProps {
   isOpen: boolean
   onClose: () => void
-  onSend: (text: string) => InputSendResult
+  onSend: (text: string) => InputSendResult | Promise<InputSendResult>
   presetGroups: UserPresetGroup[]
   activePresetGroupId: string
   onActivePresetGroupChange: (groupId: string) => void
@@ -163,6 +163,7 @@ export const TextInputModal: React.FC<TextInputBarProps> = ({
   const [formText, setFormText] = useState('')
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
   const [sendError, setSendError] = useState<string | null>(null)
+  const [isSending, setIsSending] = useState(false)
   const [dumpResult, setDumpResult] = useState<DumpResult | null>(null)
   const [dumpError, setDumpError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -225,25 +226,33 @@ export const TextInputModal: React.FC<TextInputBarProps> = ({
     })
   }, [])
 
-  const handleSend = useCallback(() => {
-    if (!text) return
-    const result = onSend(text)
-    if (!result.ok) {
-      const messages: Record<typeof result.reason, string> = {
-        disconnected: '连接已断开，内容已保留，请重连后重试。',
-        terminalUnavailable: '终端尚未就绪，内容已保留，请稍后重试。',
-        sendFailed: '发送失败，内容已保留，请重试。',
-        unsafeMultiline: '当前界面未启用安全多行粘贴，请回到 Codex 输入界面后重试。',
+  const handleSend = useCallback(async () => {
+    if (!text || isSending) return
+    setIsSending(true)
+    try {
+      const result = await onSend(text)
+      if (!result.ok) {
+        const messages: Record<typeof result.reason, string> = {
+          disconnected: '连接已断开，内容已保留，请重连后重试。',
+          terminalUnavailable: '终端尚未就绪，内容已保留，请稍后重试。',
+          sendFailed: '发送失败，内容已保留，请重试。',
+          unsafeMultiline: '当前界面未启用安全多行粘贴，内容已保留，请切换到支持的输入界面后重试。',
+        }
+        setSendError(result.message ?? messages[result.reason])
+        return
       }
-      setSendError(messages[result.reason])
-      return
+      pushHistory(text)
+      setSendError(null)
+      setText('')
+      sessionStorage.removeItem(DRAFT_KEY)
+      onClose()
+    } catch (error) {
+      console.error('[TextInputModal] Failed to send text:', error)
+      setSendError('发送失败，内容已保留，请重试。')
+    } finally {
+      setIsSending(false)
     }
-    pushHistory(text)
-    setSendError(null)
-    setText('')
-    sessionStorage.removeItem(DRAFT_KEY)
-    onClose()
-  }, [text, onSend, onClose, pushHistory])
+  }, [text, isSending, onSend, onClose, pushHistory])
 
   const handleDump = useCallback(async () => {
     if (!text) return
@@ -618,11 +627,11 @@ export const TextInputModal: React.FC<TextInputBarProps> = ({
           落盘
         </button>
         <button
-          onClick={handleSend}
-          disabled={!text}
+          onClick={() => { void handleSend() }}
+          disabled={!text || isSending}
           className="shrink-0 px-3 h-8 bg-accent-blue text-white text-sm rounded-lg font-medium active:opacity-80 disabled:opacity-40 mb-[1px]"
         >
-          Send
+          {isSending ? '发送中…' : 'Send'}
         </button>
       </div>
 

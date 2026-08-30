@@ -50,7 +50,7 @@ impl TerminalController {
             return Err("pane id is required".to_string());
         }
 
-        let mut child = Command::new("herdr")
+        let mut child = Command::new(herdr_binary())
             .args([
                 "terminal",
                 "session",
@@ -217,7 +217,7 @@ pub async fn list() -> Result<Value, String> {
 }
 
 pub async fn protocol_version() -> Result<u64, String> {
-    let output = Command::new("herdr")
+    let output = Command::new(herdr_binary())
         .args(["api", "schema", "--json"])
         .output()
         .await
@@ -234,6 +234,24 @@ pub async fn protocol_version() -> Result<u64, String> {
         .get("protocol")
         .and_then(Value::as_u64)
         .ok_or_else(|| "herdr schema did not include protocol".to_string())
+}
+
+fn herdr_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("HERDR_BIN_PATH").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+
+    let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/herdr"),
+        PathBuf::from("/usr/local/bin/herdr"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/bin/herdr"));
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("herdr"))
 }
 
 impl EventSubscription {
