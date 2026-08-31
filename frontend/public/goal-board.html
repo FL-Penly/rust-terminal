@@ -378,6 +378,7 @@
 <script>
 const WORKSPACE_API = '/api/goal-workspace';
 const DUMP_API = '/api/dump-file';
+const GOAL_DUMP_API = '/api/goal-dump';
 const VARIABLE_START = '【变量区】';
 const EXECUTION_START = '【执行区】';
 
@@ -966,6 +967,7 @@ function renderCopyView(copy) {
     '<div class="meta">源母版：' + escapeHtml(copy.sourceTemplateTitle || '已删除的母版') +
     ' · 更新于 ' + escapeHtml(formatUpdated(copy.updatedAt)) + '</div></div>' +
     '<div class="actions"><button id="dump-selection" disabled>落盘选中</button>' +
+    '<button id="dump-goal">落盘完整 Goal 并复制路径</button>' +
     '<button id="copy-goal" class="primary">复制完整 Goal</button><button id="delete-copy" class="danger">删除</button></div></div>' +
     '<div class="card-body"><div id="dump-feedback"></div>' +
     '<section class="section"><span class="section-label">本次变量值 · 选中文字后点「落盘选中」（变量定义请在母版维护）</span>' +
@@ -1015,6 +1017,7 @@ function renderCopyView(copy) {
     dumpSelection(copy, savedSelection.textarea, savedSelection.target);
   });
   byId('expand-copy-body').addEventListener('click', () => openExpandedEditor(copy, bodyTarget, '完整 Goal 正文'));
+  byId('dump-goal').addEventListener('click', () => dumpCompleteGoal(copy));
   byId('copy-goal').addEventListener('click', () => copyCompleteGoal(copy.variables, copy.body));
   byId('delete-copy').addEventListener('click', () => deleteCopy(copy));
   renderDumpFeedback(copy);
@@ -1121,6 +1124,53 @@ function copyCompleteGoal(variables, body) {
       console.error('[PromptBoard] Failed to copy goal:', error);
       toast('复制失败，请重试');
     });
+}
+
+async function dumpCompleteGoal(copy) {
+  const button = byId('dump-goal');
+  if (!button || button.dataset.loading === 'true') return;
+  button.dataset.loading = 'true';
+  button.disabled = true;
+  button.textContent = '落盘中...';
+  lastDumpPath = '';
+  lastDumpMessage = '';
+  lastDumpError = false;
+  renderDumpFeedback(copy);
+  try {
+    const response = await fetch(GOAL_DUMP_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        workingCopyId: copy.id,
+        text: completeGoalText(copy.variables, copy.body),
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || typeof payload.path !== 'string') {
+      throw new Error(payload.message || '落盘失败（' + response.status + '）');
+    }
+    lastDumpPath = payload.path;
+    try {
+      await writeClipboard(payload.path);
+      lastDumpMessage = '完整 Goal 已落盘，路径已复制。';
+      toast('完整 Goal 已落盘，路径已复制');
+    } catch (error) {
+      console.error('[PromptBoard] Failed to copy dumped goal path:', error);
+      lastDumpMessage = '完整 Goal 已落盘，但自动复制路径失败，请手动复制。';
+      toast('已落盘，请手动复制路径');
+    }
+    renderDumpFeedback(copy);
+  } catch (error) {
+    console.error('[PromptBoard] Failed to dump complete goal:', error);
+    lastDumpPath = '';
+    lastDumpError = true;
+    lastDumpMessage = (error instanceof Error ? error.message : String(error)) + '，完整 Goal 未落盘，可重试。';
+    renderDumpFeedback(copy);
+  } finally {
+    button.dataset.loading = 'false';
+    button.disabled = false;
+    button.textContent = '落盘完整 Goal 并复制路径';
+  }
 }
 
 async function dumpSelection(copy, textarea, target) {
